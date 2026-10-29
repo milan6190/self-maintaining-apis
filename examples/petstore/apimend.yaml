@@ -1,0 +1,12 @@
+# Example: a Petstore API that drifts from v1 to v2.
+# PETSTORE_VERSION stands in for "time passing": the baseline is taken at v1,
+# then the check runs against v2. With a real API you'd point at live URLs instead.
+store: .apimend
+fail_on: breaking
+
+apis:
+  - name: petstore
+    spec: ./specs/petstore-${PETSTORE_VERSION:-v1}.yaml
+    endpoints:
+      - name: list-pets
+        samples: ./samples/${PETSTORE_VERSION:-v1}/list-pets/*.json

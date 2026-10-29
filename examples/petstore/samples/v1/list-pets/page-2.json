@@ -1,0 +1,24 @@
+[
+  {
+    "id": 3,
+    "name": "Luna",
+    "age": 2,
+    "status": "sold",
+    "tag": "cat",
+    "owner": {
+      "email": "cara@example.com",
+      "phone": "555-0103"
+    }
+  },
+  {
+    "id": 4,
+    "name": "Kiwi",
+    "age": 1,
+    "status": "available",
+    "tag": "bird",
+    "owner": {
+      "email": "dev@example.com",
+      "phone": "555-0104"
+    }
+  }
+]

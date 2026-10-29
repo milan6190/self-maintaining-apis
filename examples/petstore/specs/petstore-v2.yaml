@@ -1,0 +1,85 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 2.0.0
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: region
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: A list of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pet" }
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPet" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters:
+        - { name: petId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: A pet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/search:
+    get:
+      operationId: searchPets
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Matching pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pet" }
+components:
+  schemas:
+    Owner:
+      type: object
+      required: [emailAddress]
+      properties:
+        emailAddress: { type: string, format: email }
+        phone: { type: string }
+    NewPet:
+      type: object
+      required: [petName, species]
+      properties:
+        petName: { type: string }
+        age: { type: string }
+        species: { type: string }
+    Pet:
+      type: object
+      required: [id, petName, age, status, owner]
+      properties:
+        id: { type: integer }
+        petName: { type: string }
+        age: { type: string, description: "Age in years, as a string" }
+        status: { type: string, enum: [available, pending, sold, adopted] }
+        owner: { $ref: "#/components/schemas/Owner" }

@@ -1,0 +1,75 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: A list of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pet" }
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPet" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters:
+        - { name: petId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: A pet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+    delete:
+      operationId: deletePet
+      parameters:
+        - { name: petId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Deleted }
+components:
+  schemas:
+    Owner:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        phone: { type: string }
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        age: { type: integer }
+        tag: { type: string }
+    Pet:
+      type: object
+      required: [id, name, age, status, owner]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        age: { type: integer }
+        status: { type: string, enum: [available, pending, sold] }
+        tag: { type: string }
+        owner: { $ref: "#/components/schemas/Owner" }

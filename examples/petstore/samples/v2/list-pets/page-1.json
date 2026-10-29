@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "petName": "Rex",
+    "age": "3",
+    "status": "available",
+    "owner": {
+      "emailAddress": "ana@example.com",
+      "phone": "555-0101"
+    }
+  },
+  {
+    "id": 2,
+    "petName": "Milo",
+    "age": "5",
+    "status": "pending",
+    "owner": {
+      "emailAddress": "ben@example.com",
+      "phone": "555-0102"
+    }
+  }
+]

@@ -1,0 +1,46 @@
+# Copy to .github/workflows/apimend-nightly.yml in your repository.
+# Checks the APIs you depend on every morning, and opens an issue when they break.
+name: API drift check
+
+on:
+  schedule:
+    - cron: "17 11 * * *"   # daily, 11:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: apimend
+        uses: milan6190/self-maintaining-apis@main
+        continue-on-error: true
+        with:
+          config: apimend.yaml
+          heal: "true"
+        env:
+          PARTNER_API_TOKEN: ${{ secrets.PARTNER_API_TOKEN }}   # referenced as ${PARTNER_API_TOKEN} in apimend.yaml
+
+      - name: Open an issue on breaking drift
+        if: steps.apimend.outputs.breaking > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "API drift: ${{ steps.apimend.outputs.breaking }} breaking change(s)" \
+            --body-file "${{ steps.apimend.outputs.report }}" \
+            --label api-drift || \
+          gh issue create \
+            --title "API drift: ${{ steps.apimend.outputs.breaking }} breaking change(s)" \
+            --body-file "${{ steps.apimend.outputs.report }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apimend
+          path: .apimend/

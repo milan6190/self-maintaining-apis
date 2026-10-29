@@ -1,0 +1,13 @@
+[
+  {
+    "id": 5,
+    "name": "Bolt",
+    "age": 7,
+    "status": "available",
+    "tag": "dog",
+    "owner": {
+      "email": "eli@example.com",
+      "phone": "555-0105"
+    }
+  }
+]

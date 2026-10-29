@@ -1,0 +1,77 @@
+name: apimend API drift check
+description: Detect breaking changes in the APIs you consume, and generate repair plans.
+author: Milankumar Rana
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  config:
+    description: Path to apimend.yaml, relative to working-directory
+    default: apimend.yaml
+  working-directory:
+    description: Directory to run in
+    default: .
+  fail-on:
+    description: "Fail the step on: breaking | warning | never (default: the config's fail_on)"
+    default: ""
+  heal:
+    description: Also generate repair plans after the check (true/false)
+    default: "false"
+  python-version:
+    description: Python version to use
+    default: "3.12"
+
+outputs:
+  breaking:
+    description: Number of breaking changes
+    value: ${{ steps.check.outputs.breaking }}
+  warning:
+    description: Number of warnings
+    value: ${{ steps.check.outputs.warning }}
+  report:
+    description: Path to the Markdown report
+    value: ${{ steps.check.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install apimend
+      shell: bash
+      run: python -m pip install --quiet "${{ github.action_path }}"
+
+    - name: Check for drift
+      id: check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        HEAL: ${{ inputs.heal }}
+      run: |
+        report="$RUNNER_TEMP/apimend-report.md"
+        args=(-c "$CONFIG" check -o "$report")
+        [ -n "$FAIL_ON" ] && args+=(--fail-on "$FAIL_ON")
+        set +e
+        apimend "${args[@]}" > /dev/null
+        rc=$?
+        set -e
+        [ -f "$report" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        python - <<'EOF' >> "$GITHUB_OUTPUT"
+        import json, os
+        from apimend.config import load_config
+        cfg = load_config(os.environ["CONFIG"])
+        p = cfg.store / "report.json"
+        s = json.loads(p.read_text())["summary"] if p.exists() else {}
+        print(f"breaking={s.get('breaking', 0)}")
+        print(f"warning={s.get('warning', 0)}")
+        EOF
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        if [ "$HEAL" = "true" ] && [ "$rc" != "2" ]; then
+          apimend -c "$CONFIG" heal
+        fi
+        exit $rc

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apimend"
+version = "0.1.0"
+description = "Detect, diagnose, repair and verify drift in the APIs you consume."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Milankumar Rana" }]
+keywords = ["api", "openapi", "drift", "contract-testing", "integration", "self-healing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+apimend = "apimend.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/milan6190/self-maintaining-apis"
+Issues = "https://github.com/milan6190/self-maintaining-apis/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
