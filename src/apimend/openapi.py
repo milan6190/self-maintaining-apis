@@ -127,13 +127,19 @@ def is_success(status: str) -> bool:
     return status.startswith("2") or status.upper() == "2XX" or status == "default"
 
 
-SCHEMA_PREFIXES = ("#/components/schemas/", "#/definitions/")
+SCHEMA_PREFIXES = ("#/components/schemas/", "#/definitions/", "#/x-apimend-bundled/")
+_SCHEMA_KEYS = {"type", "properties", "items", "allOf", "anyOf", "oneOf", "enum", "additionalProperties", "$ref"}
+_NOT_SCHEMA_KEYS = {"content", "in", "responses", "parameters", "requestBody", "get", "post", "put", "patch", "delete"}
 
 
 def named_schemas(doc: dict) -> dict[str, Any]:
-    """Shared schemas: OpenAPI 3 ``components.schemas`` or Swagger 2 ``definitions``."""
+    """Shared schemas: ``components.schemas``, Swagger 2 ``definitions``, and schemas
+    bundled in from other files."""
     out = dict((doc.get("components") or {}).get("schemas") or {})
     out.update(doc.get("definitions") or {})
+    for name, node in (doc.get("x-apimend-bundled") or {}).items():
+        if isinstance(node, dict) and node.keys() & _SCHEMA_KEYS and not node.keys() & _NOT_SCHEMA_KEYS:
+            out.setdefault(name, node)
     return out
 
 

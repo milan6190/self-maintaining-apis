@@ -1,0 +1,7 @@
+query RecentOrders($first: Int = 10) {
+  orders(first: $first) {
+    id
+    status
+    total
+  }
+}

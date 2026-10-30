@@ -3,7 +3,7 @@
 Detect contract drift, diagnose it, generate repair plans, and verify them.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .diff import Change, diff_fields, diff_specs  # noqa: E402
 from .heal import Healer, apply_plan, build_plan  # noqa: E402

@@ -1,0 +1,16 @@
+query GetUser($id: ID!) {
+  user(id: $id) {
+    id
+    email
+    username
+    orders(status: PAID) {
+      ...OrderSummary
+    }
+  }
+}
+
+fragment OrderSummary on Order {
+  id
+  status
+  total
+}

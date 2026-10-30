@@ -1,0 +1,10 @@
+{
+  "info": { "_postman_id": "1f0c", "name": "Logistics partner", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "variable": [{ "key": "baseUrl", "value": "https://api.shipfast-logistics.io" }],
+  "item": [
+    { "name": "Shipments", "item": [
+      { "name": "List shipments", "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/v1/shipments?status=open" } } },
+      { "name": "Create label", "request": { "method": "POST", "url": "{{baseUrl}}/v1/labels" } }
+    ]}
+  ]
+}

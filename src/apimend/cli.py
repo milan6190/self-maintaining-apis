@@ -10,9 +10,12 @@ from typing import Any
 
 from . import __version__
 from .config import DEFAULT_CONFIG, STARTER, Api, Config, ConfigError, Endpoint, load_config
-from .diff import RESPONSE, FieldDiff, diff_fields, diff_specs
-from .fetch import FetchError, fetch_json, load_document
+from .diff import BREAKING, RESPONSE, WARNING, Change, FieldDiff, diff_fields, diff_specs
+from .fetch import FetchError, fetch_json
+from .gql import check as gql_check
+from .gql.operations import expand_patterns
 from .heal import build_plan, merge_manual_ops
+from .specs import kind_of, load_graphql_endpoint, load_spec
 from .report import ApiResult, Report
 from .schema import collect_values, flatten_samples, infer
 from .store import BASELINE, CURRENT, Store
@@ -51,12 +54,15 @@ def collect_samples(cfg: Config, ep: Endpoint) -> list[Any]:
 def pull(cfg: Config, store: Store, api: Api, kind: str, append: bool = False) -> list[str]:
     """Fetch the spec and samples for ``api`` into ``kind`` (baseline/current)."""
     errors: list[str] = []
-    if api.spec:
+    if api.has_schema:
         try:
-            doc = load_document(cfg.resolve(api.spec), headers=api.headers)
+            if api.graphql:
+                doc = load_graphql_endpoint(api.graphql, headers=api.headers)
+            else:
+                doc = load_spec(cfg.resolve(api.spec), headers=api.headers)
             store.save_spec(kind, api.name, doc)
         except FetchError as e:
-            errors.append(f"spec: {e}")
+            errors.append(f"{'graphql' if api.graphql else 'spec'}: {e}")
     for ep in api.endpoints:
         try:
             samples = collect_samples(cfg, ep)
@@ -81,6 +87,31 @@ def endpoint_diff(store: Store, api: str, endpoint: str) -> FieldDiff | None:
 
 def _selected(cfg: Config, names: list[str] | None) -> list[Api]:
     return [cfg.api(n) for n in names] if names else cfg.apis
+
+
+def operation_files(cfg: Config, api: Api) -> list[str]:
+    return expand_patterns(api.operations, cfg.base) if api.operations else []
+
+
+def _graphql_errors(samples: list[Any]) -> list[str]:
+    """Messages from GraphQL-style ``{"errors": [...]}`` response bodies."""
+    out = []
+    for s in samples:
+        if isinstance(s, dict) and isinstance(s.get("errors"), list) and s["errors"]:
+            for e in s["errors"]:
+                msg = e.get("message") if isinstance(e, dict) else str(e)
+                if msg and msg not in out:
+                    out.append(str(msg))
+    return out
+
+
+def schema_changes(cfg: Config, api: Api, old: dict, new: dict) -> list[Change]:
+    if kind_of(old) != kind_of(new):
+        return [Change(BREAKING, "format-changed", "spec", "",
+                       f"the description changed format ({kind_of(old)} → {kind_of(new)}); re-run `apimend snapshot`")]
+    if kind_of(new) == "graphql":
+        return gql_check.check(old, new, operation_files(cfg, api), cfg.base, api.only_used).changes
+    return diff_specs(old, new)
 
 
 # --------------------------------------------------------------------- commands
@@ -127,16 +158,22 @@ def run_check(cfg: Config, apis: list[Api], refresh: bool = True) -> Report:
             continue
         if refresh:
             res.errors.extend(pull(cfg, store, api, CURRENT))
-        if api.spec:
+        if api.has_schema:
             old, new = store.load_spec(BASELINE, api.name), store.load_spec(CURRENT, api.name)
             if old is None:
                 res.errors.append("baseline has no spec; run `apimend snapshot`")
             elif new is not None:
-                res.changes.extend(diff_specs(old, new))
+                res.changes.extend(schema_changes(cfg, api, old, new))
         for ep in api.endpoints:
-            if not store.load_samples(BASELINE, api.name, ep.name):
+            base = store.load_samples(BASELINE, api.name, ep.name)
+            if not base:
                 res.errors.append(f"{ep.name}: baseline has no samples; run `apimend snapshot`")
                 continue
+            failing = [m for m in _graphql_errors(store.load_samples(CURRENT, api.name, ep.name))
+                       if m not in _graphql_errors(base)]
+            if failing:
+                res.changes.append(Change(BREAKING, "request-failing", f"{ep.name} (live)", "$.errors",
+                                          f"`{ep.name}` now returns errors: {'; '.join(failing[:3])}"))
             fd = endpoint_diff(store, api.name, ep.name)
             if fd is not None:
                 res.changes.extend(fd.changes)
@@ -193,12 +230,46 @@ def cmd_heal(args) -> int:
                     _out(f"    {op['op']} {op.get('path', '')} (kept from your edits)")
             for u in plan["unresolved"]:
                 _out(f"    ! {u['message']}")
-        if api.spec and not api.endpoints:
-            _out(f"- {api.name}: spec-only; plans need live samples (add `endpoints`)")
+        if api.operations:
+            wrote += heal_graphql(cfg, store, api, args.apply)
+        elif api.has_schema and not api.endpoints:
+            _out(f"- {api.name}: schema-only; repairs need live samples (`endpoints`) "
+                 "or, for GraphQL, your `operations`")
     if wrote:
-        _out("\nReview the plans, then run `apimend verify`. Apply them in code with "
+        _out("\nReview the plans, then run `apimend verify`. Apply response plans in code with "
              "`apimend.Healer.from_file(...)`.")
     return EXIT_OK
+
+
+def heal_graphql(cfg: Config, store: Store, api: Api, apply: bool) -> int:
+    old, new = store.load_spec(BASELINE, api.name), store.load_spec(CURRENT, api.name)
+    if old is None or new is None or kind_of(new) != "graphql":
+        _out(f"- {api.name}: no baseline or current GraphQL schema (run `apimend check`)")
+        return 0
+    plan, patch = gql_check.heal(old, new, operation_files(cfg, api), cfg.base, api.name)
+    if not plan["edits"] and not plan["unresolved"]:
+        store.remove_gql_fix(api.name)
+        _out(f"✓ {api.name}: your operations are valid against the current schema")
+        return 0
+    path = store.save_gql_fix(api.name, plan, patch)
+    _out(f"✓ {api.name}: {len(plan['edits'])} operation fix(es), {len(plan['unresolved'])} need a human → {path}")
+    for e in plan["edits"]:
+        _out(f"    {e['file']}: `{e['old']}` → `{e['new']}`  ({e['reason']})")
+    for u in plan["unresolved"]:
+        _out(f"    ! {u['where']}: {u['message']}")
+    if plan["edits"]:
+        if apply:
+            try:
+                changed = gql_check.apply(plan, cfg.base)
+            except ValueError as e:
+                _err(str(e))
+                return 1
+            plan["applied"], plan["edits"] = plan["edits"], []
+            store.save_gql_fix(api.name, plan, patch)
+            _out(f"    applied to {len(changed)} file(s)")
+        else:
+            _out(f"    review {path.with_suffix('.patch')}, then `apimend heal --apply` to edit your files")
+    return 1
 
 
 def cmd_verify(args) -> int:
@@ -207,10 +278,32 @@ def cmd_verify(args) -> int:
     plans = store.plans()
     if args.api:
         plans = [p for p in plans if p.parent.name in args.api]
-    if not plans:
+    gql_apis = [a for a in _selected(cfg, args.api) if a.operations]
+    if not plans and not gql_apis:
         _out("No plans to verify (run `apimend heal` first).")
         return EXIT_OK
     failed = False
+    for api in gql_apis:
+        new = store.load_spec(CURRENT, api.name) or store.load_spec(BASELINE, api.name)
+        if new is None or kind_of(new) != "graphql":
+            _err(f"{api.name}: no GraphQL schema recorded (run `apimend snapshot`)")
+            failed = True
+            continue
+        plan = store.load_gql_fix(api.name)
+        try:
+            res = gql_check.verify(new, operation_files(cfg, api), plan, cfg.base)
+        except (ValueError, OSError) as e:
+            _err(f"{api.name}: {e}")
+            failed = True
+            continue
+        fixes = f" with {len(plan['edits'])} fix(es) from `apimend heal`" if plan and plan.get("edits") else ""
+        if res.ok:
+            _out(f"✓ {api.name}: {res.operations} operation(s) valid against the current schema{fixes}")
+        else:
+            failed = True
+            _out(f"✗ {api.name}: {len(res.errors)} problem(s) in {res.operations} operation(s){fixes}")
+            for e in res.errors[:20]:
+                _out(f"    {e}")
     for p in plans:
         plan = json.loads(p.read_text(encoding="utf-8"))
         api, ep = p.parent.name, p.stem
@@ -245,22 +338,74 @@ def cmd_accept(args) -> int:
             return EXIT_ERROR
         for ep in api.endpoints:
             store.remove_plan(api.name, ep.name)
+        store.remove_gql_fix(api.name)
         _out(f"✓ {api.name}: current accepted as the new baseline")
     return EXIT_OK
 
 
 def cmd_diff(args) -> int:
     try:
-        old, new = load_document(args.old), load_document(args.new)
+        old, new = load_spec(args.old), load_spec(args.new)
     except FetchError as e:
         _err(str(e))
         return EXIT_ERROR
-    report = Report([ApiResult(f"{args.old} → {args.new}", diff_specs(old, new))])
+    if kind_of(old) != kind_of(new):
+        _err(f"cannot compare {kind_of(old)} with {kind_of(new)}")
+        return EXIT_ERROR
+    if kind_of(new) == "graphql":
+        files = expand_patterns(args.operations, Path.cwd()) if args.operations else []
+        changes = gql_check.check(old, new, files, Path.cwd()).changes
+    else:
+        changes = diff_specs(old, new)
+    report = Report([ApiResult(f"{args.old} → {args.new}", changes)])
     if args.format == "json":
         _out(json.dumps(report.to_dict(), indent=2))
     else:
         _out(report.to_markdown(show_info=not args.quiet))
     return EXIT_DRIFT if report.exceeds(args.fail_on) else EXIT_OK
+
+
+def cmd_scan(args) -> int:
+    from .scan import scan, summary_table, to_yaml
+
+    roots = [Path(p) for p in (args.paths or ["."])]
+    for r in roots:
+        if not r.is_dir():
+            _err(f"{r} is not a directory")
+            return EXIT_ERROR
+    out = Path(args.out or args.config)
+    result = scan(roots, out.resolve().parent, include_local=args.include_local)
+    if args.format == "json":
+        _out(json.dumps(result.to_dict(), indent=2))
+        return EXIT_OK
+    text = to_yaml(result, enable_live=args.enable_live)
+    if args.print:
+        _out(text)
+        return EXIT_OK
+    _out(f"Scanned {result.files_scanned} file(s) in {', '.join(str(r) for r in roots)}.")
+    if not result.apis:
+        _out("No external APIs found. Add one by hand: `apimend init` writes a commented example.")
+        return EXIT_OK
+    _out("")
+    _out(summary_table(result))
+    for w in result.warnings:
+        _out(f"! {w}")
+    if result.skipped_local:
+        _out(f"(skipped {result.skipped_local} localhost URL(s); use --include-local to keep them)")
+    if out.exists() and not args.force:
+        _err(f"{out} already exists; use --force to overwrite, --out to write elsewhere, or --print")
+        return EXIT_ERROR
+    out.write_text(text, encoding="utf-8")
+    ready = sum(1 for a in result.apis if a.ready)
+    _out(f"\nWrote {out}: {ready} API(s) ready, {len(result.apis) - ready} need a step noted in the file.")
+    if args.snapshot and ready:
+        _out("")
+        args.config = str(out)
+        args.api, args.append = [], False
+        return cmd_snapshot(args)
+    if ready:
+        _out("Next: `apimend snapshot` to record a baseline, then `apimend check` (locally or in CI).")
+    return EXIT_OK
 
 
 def cmd_infer(args) -> int:
@@ -334,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("heal", help="generate repair plans from the last check")
     s.add_argument("api", nargs="*")
+    s.add_argument("--apply", action="store_true", help="also apply GraphQL operation fixes to your files")
     s.set_defaults(func=cmd_heal)
 
     s = sub.add_parser("verify", help="replay current samples through the plans")
@@ -344,13 +490,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("api", nargs="*")
     s.set_defaults(func=cmd_accept)
 
-    s = sub.add_parser("diff", help="compare two OpenAPI/Swagger documents")
+    s = sub.add_parser("diff", help="compare two OpenAPI, Swagger or GraphQL schemas")
     s.add_argument("old")
     s.add_argument("new")
+    s.add_argument("--operations", action="append", metavar="GLOB",
+                   help="GraphQL only: also check these operation files against the new schema")
     s.add_argument("--format", choices=["md", "json"], default="md")
     s.add_argument("--fail-on", choices=["breaking", "warning", "never"], default="breaking")
     s.add_argument("-q", "--quiet", action="store_true")
     s.set_defaults(func=cmd_diff)
+
+    s = sub.add_parser("scan", help="find the APIs your code uses and write apimend.yaml")
+    s.add_argument("paths", nargs="*", help="directories to scan (default: .)")
+    s.add_argument("-o", "--out", help="config file to write (default: the -c path, apimend.yaml)")
+    s.add_argument("--force", action="store_true", help="overwrite an existing config")
+    s.add_argument("--print", action="store_true", help="print the config instead of writing it")
+    s.add_argument("--format", choices=["yaml", "json"], default="yaml",
+                   help="json prints an inventory of what was found (for dashboards and org-wide scans)")
+    s.add_argument("--enable-live", action="store_true",
+                   help="also enable live GET endpoints and GraphQL introspection found in code")
+    s.add_argument("--include-local", action="store_true", help="keep localhost URLs")
+    s.add_argument("--snapshot", action="store_true", help="record a baseline right after writing the config")
+    s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("infer", help="print the JSON Schema inferred from sample files")
     s.add_argument("files", nargs="+")

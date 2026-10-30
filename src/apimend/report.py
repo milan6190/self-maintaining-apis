@@ -72,7 +72,11 @@ class Report:
                 lines += ["| | Where | Change | Auto-fix |", "| --- | --- | --- | --- |"]
                 for c in shown:
                     fix = "yes" if c.healable else ""
-                    msg = c.message.replace("|", "\\|")
+                    msg = c.message
+                    if c.used_by:
+                        more = f" +{len(c.used_by) - 3}" if len(c.used_by) > 3 else ""
+                        msg += f" · used by {', '.join(c.used_by[:3])}{more}"
+                    msg = msg.replace("|", "\\|")
                     lines.append(f"| {ICON[c.severity]} | {c.location} | {msg} | {fix} |")
             hidden = len(r.changes) - len(shown)
             if hidden:

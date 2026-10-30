@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apimend"
-version = "0.1.0"
-description = "Detect, diagnose, repair and verify drift in the APIs you consume."
+version = "0.2.0"
+description = "Find the APIs your code depends on, then detect, repair and verify drift in them (REST and GraphQL)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Milankumar Rana" }]
-keywords = ["api", "openapi", "drift", "contract-testing", "integration", "self-healing"]
+keywords = ["api", "openapi", "graphql", "drift", "contract-testing", "integration", "self-healing", "api-inventory"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

@@ -18,8 +18,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[dev]"
       - run: pytest -q
-      - name: Run the example end to end
-        run: ./examples/petstore/demo.sh
+      - name: Run the examples end to end
+        run: |
+          ./examples/petstore/demo.sh
+          ./examples/graphql-shop/demo.sh
+      - name: Scan the sample company repo
+        run: |
+          cd examples/scan-demo/acme-app
+          apimend scan --print > /tmp/apimend.yaml
+          grep -q "name: stripe" /tmp/apimend.yaml
+          grep -q "name: github-graphql" /tmp/apimend.yaml
 
   action:
     runs-on: ubuntu-latest

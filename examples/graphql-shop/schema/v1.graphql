@@ -1,0 +1,32 @@
+"""Shop API, version 1"""
+type Query {
+  user(id: ID!): User
+  products(pageSize: Int = 20, category: String): [Product!]!
+  order(id: ID!): Order
+  adminStats: Stats
+}
+
+type User {
+  id: ID!
+  email: String!
+  username: String!
+  orders(status: OrderStatus): [Order!]!
+}
+
+type Product {
+  id: ID!
+  title: String!
+  price: Float!
+  legacySku: String
+}
+
+type Order {
+  id: ID!
+  status: OrderStatus!
+  total: Float!
+  items: [Product!]!
+}
+
+enum OrderStatus { PENDING PAID SHIPPED }
+
+type Stats { users: Int! orders: Int! }

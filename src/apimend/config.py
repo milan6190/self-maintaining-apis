@@ -47,6 +47,8 @@ class Endpoint:
     body: Any = None
     samples: str | None = None  # glob of local JSON files, used instead of url
     timeout: float = 30.0
+    query: str | None = None  # a GraphQL operation; sent as a POST body
+    variables: dict | None = None
 
     def sample_files(self, base: Path) -> list[Path]:
         if not self.samples:
@@ -58,9 +60,16 @@ class Endpoint:
 @dataclass
 class Api:
     name: str
-    spec: str | None = None
+    spec: str | None = None  # OpenAPI/Swagger/GraphQL file or URL
+    graphql: str | None = None  # live GraphQL endpoint, read by introspection
     headers: dict[str, str] = field(default_factory=dict)  # for fetching the spec
     endpoints: list[Endpoint] = field(default_factory=list)
+    operations: list[str] = field(default_factory=list)  # globs of the GraphQL operations you send
+    only_used: bool = False  # report only schema changes that touch your operations
+
+    @property
+    def has_schema(self) -> bool:
+        return bool(self.spec or self.graphql)
 
 
 @dataclass
@@ -99,6 +108,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
         raise ConfigError(f"{path} not found (run `apimend init` to create one)")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     raw = expand_env(raw)
+    if isinstance(raw, dict) and raw.get("apis") == []:
+        raise ConfigError(f"{path}: no APIs are enabled yet; uncomment one of the entries in `apis:`")
     if not isinstance(raw, dict) or not isinstance(raw.get("apis"), list) or not raw["apis"]:
         raise ConfigError(f"{path}: expected a non-empty `apis:` list")
 
@@ -120,24 +131,44 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
             if ename in ep_seen:
                 raise ConfigError(f"duplicate endpoint {ename!r} in {name}")
             ep_seen.add(ename)
-            if not e.get("url") and not e.get("samples"):
+            query = e.get("query")
+            url = e.get("url") or (a.get("graphql") if query else None)
+            if not url and not e.get("samples"):
                 raise ConfigError(f"{name}.{ename}: set `url` or `samples`")
+            body = e.get("body")
+            if query:
+                body = {"query": query}
+                if e.get("variables"):
+                    body["variables"] = e["variables"]
             eps.append(Endpoint(
                 name=ename,
-                url=e.get("url"),
-                method=str(e.get("method", "GET")).upper(),
-                headers={str(k): str(v) for k, v in (e.get("headers") or {}).items()},
-                body=e.get("body"),
+                url=url,
+                method=str(e.get("method", "POST" if query else "GET")).upper(),
+                headers={str(k): str(v) for k, v in (e.get("headers") or a.get("headers") or {}).items()}
+                if query else {str(k): str(v) for k, v in (e.get("headers") or {}).items()},
+                body=body,
                 samples=e.get("samples"),
                 timeout=float(e.get("timeout", 30)),
+                query=query,
+                variables=e.get("variables"),
             ))
-        if not a.get("spec") and not eps:
-            raise ConfigError(f"{name}: set a `spec`, `endpoints`, or both")
+        if a.get("spec") and a.get("graphql"):
+            raise ConfigError(f"{name}: use `spec` (a schema file) or `graphql` (a live endpoint), not both")
+        operations = a.get("operations") or []
+        if isinstance(operations, str):
+            operations = [operations]
+        if operations and not (a.get("spec") or a.get("graphql")):
+            raise ConfigError(f"{name}: `operations` needs a GraphQL `spec` or `graphql` endpoint")
+        if not a.get("spec") and not a.get("graphql") and not eps:
+            raise ConfigError(f"{name}: set a `spec`, a `graphql` endpoint, `endpoints`, or a combination")
         apis.append(Api(
             name=name,
             spec=a.get("spec"),
+            graphql=a.get("graphql"),
             headers={str(k): str(v) for k, v in (a.get("headers") or {}).items()},
             endpoints=eps,
+            operations=[str(o) for o in operations],
+            only_used=bool(a.get("only_used", False)),
         ))
 
     fail_on = raw.get("fail_on", "breaking")
@@ -156,7 +187,8 @@ fail_on: breaking        # exit non-zero on: breaking | warning | never
 
 apis:
   - name: petstore
-    # Optional: an OpenAPI 3.x or Swagger 2.0 document (URL or file, JSON or YAML)
+    # Optional: an OpenAPI 3.x / Swagger 2.0 document or a GraphQL schema
+    # (URL or file; JSON, YAML, SDL, or an introspection result)
     spec: https://petstore3.swagger.io/api/v3/openapi.json
 
     # Optional: live calls whose real responses are compared over time.
@@ -170,4 +202,16 @@ apis:
       # Or point at recorded responses instead of calling the API:
       # - name: recorded
       #   samples: ./samples/*.json
+
+  # A GraphQL API: read the schema from the live endpoint (or `spec: schema.graphql`),
+  # and check the operations your code sends against it.
+  # - name: github-graphql
+  #   graphql: https://api.github.com/graphql
+  #   headers:
+  #     Authorization: "Bearer ${GITHUB_TOKEN}"
+  #   operations:
+  #     - src/**/*.graphql
+  #     - src/**/*.ts            # gql`...` and graphql(`...`) templates are found too
+
+# Tip: `apimend scan` writes this file for you from what your code already calls.
 """

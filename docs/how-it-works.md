@@ -1,13 +1,17 @@
 # How apimend works
 
+This page covers REST (OpenAPI, Swagger and live JSON). GraphQL has its own page, [graphql.md](graphql.md), and so does finding APIs in a codebase, [scan.md](scan.md).
+
 ## 1. Two sources of truth
 
 | Source | Tells you | Used for |
 | --- | --- | --- |
-| **Spec** (OpenAPI 3.x / Swagger 2.0) | What the provider documents | Operations, parameters, request bodies, shared schemas |
+| **Spec** (OpenAPI 3.x / Swagger 2.0, one file or many) | What the provider documents | Operations, parameters, request bodies, shared schemas |
 | **Live responses** (URLs or recorded files) | What the provider actually returns | Response drift, rename detection by value, repair plans |
 
 Specs drift from reality. Watching both catches undocumented changes, and live samples carry the values that make repairs safe.
+
+Multi-file specs are bundled when they are loaded: every `$ref` to another file or URL is copied once into the document (under `x-apimend-bundled`), and refs inside those files are resolved relative to the file they came from. The baseline is therefore one self-contained document, and later diffs need no network. Specs larger than 1 MB are stored gzipped.
 
 ## 2. Flattening
 
@@ -15,7 +19,7 @@ Every schema, whether declared in a spec or inferred from responses, is flattene
 
 - Inference from samples: a property is required only if every sample has it, and `integer` + `number` merge to `number`.
 - Specs: `$ref`, `allOf` (merged), `anyOf`/`oneOf` (types unioned; an enum applies only when every branch has one), and `nullable` are handled.
-- `$ref`s are **boundaries**: a reference becomes a leaf that names its target, and each shared schema is diffed once. That keeps large, interlinked specs linear in size (Stripe's 8 MB spec diffs in under a second) and stops one change from being reported once per endpoint.
+- `$ref`s are **boundaries**: a reference becomes a leaf that names its target, and each shared schema is diffed once. That keeps large, interlinked specs linear in size (Stripe's 8 MB spec diffs in about a second) and stops one change from being reported once per endpoint.
 
 ## 3. Diffing
 
@@ -23,7 +27,7 @@ Changes are found top-down. When a parent object disappears, its children aren't
 
 **Renames** are matched between a removed and an added field under the same parent when the types are compatible (ignoring `null`) and either:
 
-- the names are similar after normalizing case and separators (`user_id` = `userId`, `email` ⊂ `emailAddress`), with similarity ≥ 0.6, or
+- the names are similar after normalizing case and separators (`user_id` = `userId`, `email` ⊂ `emailAddress`), with similarity ≥ 0.6; for names of several words, shared words count as much as shared letters, so `teamDiscussionsSettingOrganizations` is not taken for `repositoryDeployKeySettingOrganizations`, or
 - the recorded values overlap ≥ 80% across at least 3 distinct values (`label` → `title` with the same contents).
 
 After each round, the new shape is rewritten in old names and diffed again, so renames nested under a renamed parent are found too.

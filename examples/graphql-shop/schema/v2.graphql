@@ -1,0 +1,30 @@
+"""Shop API, version 2"""
+type Query {
+  user(id: ID!): User
+  products(size: Int = 20, category: String): [Product!]!
+  order(id: ID!): Order
+  search(term: String!, region: String!): [Product!]!
+}
+
+type User {
+  id: ID!
+  emailAddress: String!
+  username: String! @deprecated(reason: "Use `handle`; removed after 2027-01-01.")
+  handle: String!
+  orders(status: OrderStatus): [Order!]!
+}
+
+type Product {
+  id: ID!
+  title: String!
+  price: Float!
+}
+
+type Order {
+  id: ID!
+  status: OrderStatus!
+  total: Float!
+  items: [Product!]!
+}
+
+enum OrderStatus { PENDING PAID SHIPPED REFUNDED }

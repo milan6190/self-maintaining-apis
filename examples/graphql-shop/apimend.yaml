@@ -1,0 +1,12 @@
+# Example: a GraphQL API whose schema changes from v1 to v2.
+# SHOP_SCHEMA stands in for "time passing". For a live API use
+# `graphql: https://api.example.com/graphql` instead of `spec:`.
+store: .apimend
+fail_on: breaking
+
+apis:
+  - name: shop
+    spec: ./schema/${SHOP_SCHEMA:-v1}.graphql
+    operations:            # the queries this app sends
+      - src/**/*.graphql
+      - src/**/*.ts

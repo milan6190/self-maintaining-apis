@@ -1,0 +1,4 @@
+schema: https://api.acme.com/graphql
+documents: src/**/*.graphql
+generates:
+  src/gql/: { preset: client }

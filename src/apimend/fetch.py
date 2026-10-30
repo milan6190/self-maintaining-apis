@@ -15,6 +15,7 @@ from . import __version__
 
 USER_AGENT = f"apimend/{__version__} (+https://github.com/milan6190/self-maintaining-apis)"
 MAX_BYTES = 50 * 1024 * 1024
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)  # the C parser is ~10x faster on big specs
 
 
 class FetchError(RuntimeError):
@@ -53,7 +54,7 @@ def parse_document(text: str, source: str = "") -> Any:
     except json.JSONDecodeError:
         pass
     try:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=YAML_LOADER)
     except yaml.YAMLError as e:
         raise FetchError(f"{source or 'document'} is neither JSON nor YAML: {e}") from e
 

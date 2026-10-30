@@ -31,6 +31,7 @@ class Change:
     healable: bool = False
     old: Any = None
     new: Any = None
+    used_by: list[str] | None = None  # GraphQL operations affected by this change
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -78,7 +79,18 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", spaced.lower())
 
 
+def name_words(name: str) -> list[str]:
+    """``teamDiscussionsSetting`` -> ``['team', 'discussions', 'setting']``."""
+    return [w for w in re.split(r"[^a-z0-9]+", _CAMEL.sub("_", name).lower()) if w]
+
+
 def name_similarity(a: str, b: str) -> float:
+    """How likely ``b`` is a rename of ``a`` (0..1).
+
+    Same name modulo case and separators scores 1.0, one name containing the
+    other 0.8+. Otherwise multi-word names must share words as well as letters,
+    so long names with a common suffix are not mistaken for renames.
+    """
     na, nb = normalize_name(a), normalize_name(b)
     if not na or not nb:
         return 0.0
@@ -87,8 +99,11 @@ def name_similarity(a: str, b: str) -> float:
     ratio = SequenceMatcher(None, na, nb).ratio()
     # one name containing the other ("email" -> "email_address") is a strong hint
     if (na in nb or nb in na) and min(len(na), len(nb)) >= 3:
-        ratio = max(ratio, 0.8)
-    return ratio
+        return max(ratio, 0.8)
+    wa, wb = set(name_words(a)), set(name_words(b))
+    if len(wa) <= 1 or len(wb) <= 1:
+        return ratio
+    return (ratio + len(wa & wb) / len(wa | wb)) / 2
 
 
 def _hashable(values: list) -> set:
@@ -216,8 +231,10 @@ def diff_fields(
             healable=response and from_samples, old=rn.old_name, new=rn.new_name,
         ))
 
-    # 2. Removed and added fields
+    # 2. Removed and added fields (array items "x[]" are explained by the parent's type change)
     for p in _top_level(set(old) - set(cur_new), cur_new):
+        if p.endswith("[]"):
+            continue
         if response:
             result.changes.append(Change(BREAKING, "field-removed", location, p,
                                          f"`{p}` is no longer returned"))
@@ -225,6 +242,8 @@ def diff_fields(
             result.changes.append(Change(WARNING, "field-removed", location, p,
                                          f"`{p}` is no longer accepted in the request"))
     for p in _top_level(set(cur_new) - set(old), old):
+        if p.endswith("[]"):
+            continue
         f = cur_new[p]
         if not response and f.required:
             result.changes.append(Change(BREAKING, "required-field-added", location, p,
@@ -245,8 +264,7 @@ def _compare_field(path, o: Field, n: Field, response: bool, location: str, from
     out: list[Change] = []
 
     if o.ref != n.ref and o.ref and n.ref:
-        out.append(Change(BREAKING if response else WARNING, "schema-changed", location, path,
-                          f"`{path}` now uses schema `{n.ref}` instead of `{o.ref}`", old=o.ref, new=n.ref))
+        out.extend(_compare_refs(path, o.ref, n.ref, response, location))
 
     if o.types and n.types and o.types != n.types:
         added_t, removed_t = n.types - o.types, o.types - n.types
@@ -319,6 +337,25 @@ def _compare_field(path, o: Field, n: Field, response: bool, location: str, from
                 out.append(Change(sev, "enum-values-removed", location, path,
                                   f"`{path}` dropped values {_values(sorted(removed_v))}",
                                   old=[json.loads(v) for v in sorted(removed_v)]))
+    return out
+
+
+def _compare_refs(path: str, old: str, new: str, response: bool, location: str) -> list[Change]:
+    """A field pointing at another shared schema, or a oneOf/anyOf union gaining or losing members."""
+    o, n = set(old.split("|")), set(new.split("|"))
+    added, removed = sorted(n - o), sorted(o - n)
+    if len(o) == 1 and len(n) == 1:
+        return [Change(BREAKING if response else WARNING, "schema-changed", location, path,
+                       f"`{path}` now uses schema `{new}` instead of `{old}`", old=old, new=new)]
+    out = []
+    if added:
+        sev = WARNING if response else INFO
+        out.append(Change(sev, "union-variant-added", location, path,
+                          f"`{path}` can now also be {_values([f'`{a}`' for a in added])}", new=added))
+    if removed:
+        sev = INFO if response else BREAKING
+        out.append(Change(sev, "union-variant-removed", location, path,
+                          f"`{path}` can no longer be {_values([f'`{r}`' for r in removed])}", old=removed))
     return out
 
 

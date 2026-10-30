@@ -1,9 +1,10 @@
 """On-disk layout under the store directory (default ``.apimend``)::
 
-    baseline/<api>/spec.json
+    baseline/<api>/spec.json       (spec.json.gz when larger than 1 MB)
     baseline/<api>/samples/<endpoint>/0001.json
     current/<api>/...              same layout, refreshed by `apimend check`
     plans/<api>/<endpoint>.json    repair plans written by `apimend heal`
+    graphql-fixes/<api>.json       GraphQL operation edits (+ a .patch to review)
     report.json, report.md         the last check
 
 Commit ``baseline/`` and ``plans/`` so drift is reviewed like code.
@@ -11,12 +12,14 @@ Commit ``baseline/`` and ``plans/`` so drift is reviewed like code.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 from pathlib import Path
 from typing import Any
 
 BASELINE, CURRENT = "baseline", "current"
+GZIP_ABOVE = 1024 * 1024
 
 
 class Store:
@@ -31,14 +34,28 @@ class Store:
         return self._dir(kind, api) / "spec.json"
 
     def save_spec(self, kind: str, api: str, doc: dict) -> Path:
+        """Readable JSON for small specs; gzipped compact JSON above 1 MB (Stripe's 8 MB spec -> ~0.5 MB)."""
         p = self.spec_path(kind, api)
+        gz = p.with_name(p.name + ".gz")
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return p
+        text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
+        if len(text) <= GZIP_ABOVE:
+            p.write_text(text, encoding="utf-8")
+            gz.unlink(missing_ok=True)
+            return p
+        compact = json.dumps(doc, separators=(",", ":"), sort_keys=True).encode()
+        gz.write_bytes(gzip.compress(compact, compresslevel=6, mtime=0))
+        p.unlink(missing_ok=True)
+        return gz
 
     def load_spec(self, kind: str, api: str) -> dict | None:
         p = self.spec_path(kind, api)
-        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+        gz = p.with_name(p.name + ".gz")
+        if gz.exists():
+            return json.loads(gzip.decompress(gz.read_bytes()))
+        return None
 
     # samples
     def samples_dir(self, kind: str, api: str, endpoint: str) -> Path:
@@ -88,6 +105,26 @@ class Store:
         p = self.plan_path(api, endpoint)
         if p.exists():
             p.unlink()
+
+    # GraphQL operation fixes
+    def gql_fix_path(self, api: str) -> Path:
+        return self.root / "graphql-fixes" / f"{api}.json"
+
+    def save_gql_fix(self, api: str, plan: dict, patch: str) -> Path:
+        p = self.gql_fix_path(api)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        p.with_suffix(".patch").write_text(patch, encoding="utf-8")
+        return p
+
+    def load_gql_fix(self, api: str) -> dict | None:
+        p = self.gql_fix_path(api)
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+    def remove_gql_fix(self, api: str) -> None:
+        for p in (self.gql_fix_path(api), self.gql_fix_path(api).with_suffix(".patch")):
+            if p.exists():
+                p.unlink()
 
     # report
     def write_report(self, data: dict, markdown: str) -> tuple[Path, Path]:

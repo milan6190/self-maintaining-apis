@@ -1,0 +1,7 @@
+{
+  "name": "acme-web",
+  "private": true,
+  "dependencies": { "@apollo/client": "^3.10.0", "@octokit/graphql": "^8.1.0", "axios": "^1.7.0" },
+  "devDependencies": { "@graphql-codegen/cli": "^5.0.0" },
+  "homepage": "https://github.com/acme/acme-app"
+}

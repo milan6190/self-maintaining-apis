@@ -111,3 +111,58 @@ def test_propose_requires_api_key(project, monkeypatch, capsys):
     src.write_text("print('hi')\n")
     assert main(["propose", "petstore", "list-pets", "--source", str(src)]) == 2
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_graphql_query_endpoint_and_failing_responses(tmp_path, monkeypatch):
+    import json as _json
+
+    from apimend.config import load_config
+
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "bad").mkdir()
+    (tmp_path / "ok/1.json").write_text(_json.dumps({"data": {"featured": [{"id": 1}]}}))
+    (tmp_path / "bad/1.json").write_text(_json.dumps({"data": None, "errors": [{"message": "Cannot query field 'featured'"}]}))
+    (tmp_path / "apimend.yaml").write_text("""
+apis:
+  - name: shop
+    graphql: https://api.shop.example/graphql
+    headers: {Authorization: "Bearer t"}
+    endpoints:
+      - name: featured
+        query: "{ featured { id } }"
+        variables: {first: 2}
+      - name: recorded
+        samples: ./${WHICH:-ok}/*.json
+""")
+    cfg = load_config(tmp_path / "apimend.yaml")
+    ep = cfg.api("shop").endpoints[0]
+    assert ep.method == "POST" and ep.url == "https://api.shop.example/graphql"
+    assert ep.body == {"query": "{ featured { id } }", "variables": {"first": 2}}
+    assert ep.headers == {"Authorization": "Bearer t"}
+
+    # only the recorded endpoint can run offline; check that new `errors` are reported as breaking
+    (tmp_path / "apimend.yaml").write_text("""
+apis:
+  - name: shop
+    endpoints:
+      - name: recorded
+        samples: ./${WHICH:-ok}/*.json
+""")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WHICH", raising=False)
+    assert main(["snapshot"]) == 0
+    monkeypatch.setenv("WHICH", "bad")
+    assert main(["check", "--format", "json"]) == 1
+    report = _json.loads((tmp_path / ".apimend/report.json").read_text())
+    failing = [c for c in report["apis"][0]["changes"] if c["kind"] == "request-failing"]
+    assert failing and "Cannot query field" in failing[0]["message"]
+
+
+def test_diff_graphql_with_operations(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.graphql").write_text("type Query { user: User } type User { email: String }")
+    (tmp_path / "b.graphql").write_text("type Query { user: User } type User { emailAddress: String }")
+    (tmp_path / "q.graphql").write_text("query Me { user { email } }")
+    monkeypatch.chdir(tmp_path)
+    assert main(["diff", "a.graphql", "b.graphql", "--operations", "*.graphql", "--format", "json"]) == 1
+    out = capsys.readouterr().out
+    assert "operation-broken" in out and "query Me" in out
