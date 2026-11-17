@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   issues: write
+  security-events: write   # for the SARIF upload
 
 jobs:
   drift:
@@ -23,6 +24,7 @@ jobs:
         with:
           config: apimend.yaml
           heal: "true"
+          sarif: "true"
         env:
           PARTNER_API_TOKEN: ${{ secrets.PARTNER_API_TOKEN }}   # referenced as ${PARTNER_API_TOKEN} in apimend.yaml
 
@@ -38,6 +40,13 @@ jobs:
           gh issue create \
             --title "API drift: ${{ steps.apimend.outputs.breaking }} breaking change(s)" \
             --body-file "${{ steps.apimend.outputs.report }}"
+
+      - name: Show drift in code scanning
+        if: always() && steps.apimend.outputs.sarif
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.apimend.outputs.sarif }}
+          category: apimend
 
       - uses: actions/upload-artifact@v4
         if: always()

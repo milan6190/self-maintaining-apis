@@ -32,6 +32,7 @@ class Change:
     old: Any = None
     new: Any = None
     used_by: list[str] | None = None  # GraphQL operations affected by this change
+    waived: str | None = None  # why this change is accepted for now (see apimend.waivers)
 
     def to_dict(self) -> dict:
         d = asdict(self)

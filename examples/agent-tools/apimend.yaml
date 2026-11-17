@@ -1,0 +1,13 @@
+# Example: the MCP server your agents call changes underneath them.
+# TOOLS_VERSION stands in for "the vendor shipped an update". With a real server,
+# set `mcp:` to the command you already run (e.g. `npx -y @acme/mcp-server`)
+# or to its Streamable HTTP URL.
+store: .apimend
+fail_on: breaking
+
+apis:
+  - name: shipping-tools
+    mcp: python3 server.py
+    owner: agent-platform
+    env:
+      TOOLS_VERSION: ${TOOLS_VERSION:-v1}

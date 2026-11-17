@@ -97,7 +97,11 @@ def test_scan_demo_repo(demo):
     # the Slack webhook call joins the Slack entry; noise stays out
     assert "hooks-slack" not in apis and any("alerts.py" in str(e) for e in apis["slack"].evidence)
     assert set(apis) == {"acme", "github-graphql", "slack", "stripe", "acme-graphql", "billing-internal-acme",
-                         "shipfast-logistics", "fxrates-provider"}
+                         "shipfast-logistics", "fxrates-provider", "shipping-tools", "docs-search-mcp"}
+    # MCP servers from .mcp.json: the command is kept, secret values are not
+    assert apis["shipping-tools"].mcp == "npx -y @acme/shipping-mcp"
+    assert apis["shipping-tools"].mcp_env == ["SHIPPING_API_KEY"] and not apis["shipping-tools"].ready
+    assert apis["docs-search-mcp"].mcp_headers == {"Authorization": "Bearer ${DOCS_TOKEN}"}
     assert result.skipped_local == 1 and not result.warnings
 
 

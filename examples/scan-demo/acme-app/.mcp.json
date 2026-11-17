@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "shipping-tools": {
+      "command": "npx",
+      "args": ["-y", "@acme/shipping-mcp"],
+      "env": { "SHIPPING_API_KEY": "replace-me" }
+    },
+    "docs-search": {
+      "type": "http",
+      "url": "https://mcp.acme.internal/docs",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }
+    }
+  }
+}

@@ -1,9 +1,12 @@
-"""Render check results as Markdown (for humans and PRs) and JSON (for tools)."""
+"""Render check results as Markdown (for humans and PRs), JSON (for tools) and SARIF (for code scanning)."""
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import __version__
 from .diff import BREAKING, INFO, SEVERITY_RANK, WARNING, Change
@@ -16,9 +19,18 @@ class ApiResult:
     name: str
     changes: list[Change] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    owner: str | None = None
+
+    @property
+    def active(self) -> list[Change]:
+        return [c for c in self.changes if not c.waived]
+
+    @property
+    def waived(self) -> list[Change]:
+        return [c for c in self.changes if c.waived]
 
     def count(self, severity: str) -> int:
-        return sum(1 for c in self.changes if c.severity == severity)
+        return sum(1 for c in self.active if c.severity == severity)
 
 
 @dataclass
@@ -26,9 +38,14 @@ class Report:
     results: list[ApiResult] = field(default_factory=list)
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+    notes: list[str] = field(default_factory=list)  # e.g. expired waivers
 
     def count(self, severity: str) -> int:
         return sum(r.count(severity) for r in self.results)
+
+    @property
+    def waived(self) -> int:
+        return sum(len(r.waived) for r in self.results)
 
     @property
     def errors(self) -> int:
@@ -38,17 +55,21 @@ class Report:
         if fail_on == "never":
             return False
         threshold = SEVERITY_RANK[fail_on]
-        return any(SEVERITY_RANK[c.severity] >= threshold for r in self.results for c in r.changes)
+        return any(SEVERITY_RANK[c.severity] >= threshold for r in self.results for c in r.active)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "tool": f"apimend {__version__}",
             "generated_at": self.generated_at,
             "summary": {"breaking": self.count(BREAKING), "warning": self.count(WARNING),
-                        "info": self.count(INFO), "errors": self.errors},
-            "apis": [{"name": r.name, "errors": r.errors, "changes": [c.to_dict() for c in r.changes]}
+                        "info": self.count(INFO), "waived": self.waived, "errors": self.errors},
+            "apis": [{"name": r.name, **({"owner": r.owner} if r.owner else {}), "errors": r.errors,
+                      "changes": [c.to_dict() for c in r.changes]}
                      for r in self.results],
         }
+        if self.notes:
+            out["notes"] = self.notes
+        return out
 
     def to_markdown(self, show_info: bool = True) -> str:
         b, w, i = self.count(BREAKING), self.count(WARNING), self.count(INFO)
@@ -57,15 +78,21 @@ class Report:
             lines += ["✅ No drift detected.", ""]
         else:
             lines += [f"**{b} breaking · {w} warning · {i} info**"
+                      + (f" · {self.waived} waived" if self.waived else "")
                       + (f" · {self.errors} error(s)" if self.errors else ""), ""]
+        for n in self.notes:
+            lines.append(f"> ⏰ {n}")
+        if self.notes:
+            lines.append("")
         for r in self.results:
-            lines.append(f"## {r.name}")
+            lines.append(f"## {r.name}" + (f" · owner: {r.owner}" if r.owner else ""))
             lines.append("")
             for e in r.errors:
                 lines.append(f"- ❗ {e}")
-            shown = [c for c in r.changes if show_info or c.severity != INFO]
+            active = r.active
+            shown = [c for c in active if show_info or c.severity != INFO]
             shown.sort(key=lambda c: (-SEVERITY_RANK[c.severity], c.location, c.path))
-            if not shown and not r.errors:
+            if not shown and not r.errors and not r.waived:
                 lines += ["No changes.", ""]
                 continue
             if shown:
@@ -78,11 +105,108 @@ class Report:
                         msg += f" · used by {', '.join(c.used_by[:3])}{more}"
                     msg = msg.replace("|", "\\|")
                     lines.append(f"| {ICON[c.severity]} | {c.location} | {msg} | {fix} |")
-            hidden = len(r.changes) - len(shown)
+            hidden = len(active) - len(shown)
             if hidden:
                 lines.append(f"\n_{hidden} info change(s) hidden._")
+            if r.waived:
+                lines += ["", f"<details><summary>{len(r.waived)} waived change(s)</summary>", ""]
+                for c in sorted(r.waived, key=lambda c: (-SEVERITY_RANK[c.severity], c.location, c.path)):
+                    lines.append(f"- {ICON[c.severity]} {c.location}: {c.message} — _{c.waived}_")
+                lines += ["", "</details>"]
             lines.append("")
-        if any(c.healable for r in self.results for c in r.changes):
+        if any(c.healable for r in self.results for c in r.active):
             lines += ["Run `apimend heal` to generate repair plans for the auto-fixable changes.", ""]
         lines.append(f"<sub>Generated by apimend {__version__} at {self.generated_at}</sub>")
         return "\n".join(lines) + "\n"
+
+
+# ------------------------------------------------------------------------ SARIF
+
+SARIF_LEVEL = {BREAKING: "error", WARNING: "warning", INFO: "note"}
+_FILE_LINE = re.compile(r"\(([^()]+?):(\d+)\)\s*$")
+
+
+def _config_lines(config: Path) -> dict[str, int]:
+    """Line of each ``- name: <api>`` entry, so findings without a file point at their config."""
+    out: dict[str, int] = {}
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for i, line in enumerate(text.splitlines(), 1):
+        m = re.match(r"^\s*-\s*name:\s*[\"']?([A-Za-z0-9._-]+)", line)
+        if m and not line.lstrip().startswith("#"):
+            out.setdefault(m.group(1), i)
+    return out
+
+
+def _uri(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def to_sarif(report: Report, config: Path, root: Path | None = None, show_info: bool = True) -> dict:
+    """SARIF 2.1.0, for GitHub code scanning, Azure DevOps, GitLab and most security dashboards.
+
+    Findings in your GraphQL operations point at the operation's file and line;
+    the rest point at the API's entry in ``apimend.yaml``. Waived changes are
+    included as suppressed results, so the dashboard keeps the audit trail.
+    """
+    root = root or Path.cwd()
+    config_uri = _uri(config, root)
+    config_base = config.resolve().parent
+    lines = _config_lines(config)
+    rules: dict[str, dict] = {}
+    results = []
+    for r in report.results:
+        for c in r.changes:
+            if c.severity == INFO and not show_info:
+                continue
+            rule = rules.setdefault(c.kind, {
+                "id": c.kind,
+                "name": "".join(w.capitalize() for w in c.kind.split("-")),
+                "shortDescription": {"text": c.kind.replace("-", " ")},
+                "helpUri": "https://github.com/milan6190/self-maintaining-apis/blob/main/docs/how-it-works.md",
+                "defaultConfiguration": {"level": SARIF_LEVEL[c.severity]},
+            })
+            if SARIF_LEVEL[c.severity] == "error":
+                rule["defaultConfiguration"]["level"] = "error"
+            m = _FILE_LINE.search(c.location)
+            if m and (config_base / m.group(1)).exists():
+                uri, line = _uri(config_base / m.group(1), root), int(m.group(2))
+            else:
+                uri, line = config_uri, lines.get(r.name, 1)
+            text = f"{r.name}: {c.location}: {c.message}"
+            if c.used_by:
+                text += f" (used by {', '.join(c.used_by)})"
+            fp = hashlib.sha256(f"{r.name}|{c.kind}|{c.location}|{c.path}".encode()).hexdigest()[:32]
+            res: dict = {
+                "ruleId": c.kind,
+                "level": SARIF_LEVEL[c.severity],
+                "message": {"text": text},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": uri, "uriBaseId": "%SRCROOT%"},
+                    "region": {"startLine": line},
+                }}],
+                "partialFingerprints": {"apimendChange/v1": fp},
+                "properties": {"api": r.name, "severity": c.severity, "path": c.path,
+                               "autoFixable": c.healable, **({"owner": r.owner} if r.owner else {})},
+            }
+            if c.waived:
+                res["suppressions"] = [{"kind": "external", "justification": c.waived}]
+            results.append(res)
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "apimend",
+                "version": __version__,
+                "informationUri": "https://github.com/milan6190/self-maintaining-apis",
+                "rules": sorted(rules.values(), key=lambda x: x["id"]),
+            }},
+            "results": results,
+        }],
+    }
