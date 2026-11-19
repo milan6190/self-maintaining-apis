@@ -21,7 +21,7 @@ apis:
     spec: vendor/tools.json                  # or a saved tools/list result
 ```
 
-`mcp:` can be a URL, a command string, or a list of arguments (`[node, dist/server.js]`). apimend sends `initialize`, then `tools/list` (following `nextCursor` pages), and stops the server. It never calls a tool. A saved file can be a `tools/list` result, the JSON-RPC response that wraps one, or a bare list of tools, so a vendor can publish their tool list the way API providers publish OpenAPI.
+`mcp:` can be a URL, a command string, or a list of arguments (`[node, dist/server.js]`). apimend sends `initialize`, then `tools/list` and, when the server offers them, `prompts/list`, `resources/list` and `resources/templates/list` (following `nextCursor` pages), and stops the server. It never calls a tool, gets a prompt or reads a resource. A saved file can be a `tools/list` result, the JSON-RPC response that wraps one, or a bare list of tools, so a vendor can publish their tool list the way API providers publish OpenAPI.
 
 `apimend scan` finds servers in `.mcp.json`, `.vscode/mcp.json`, `.cursor/mcp.json` and `claude_desktop_config.json`. It writes them as commented-out entries, because checking one starts a process or calls a URL; `--enable-live` turns them on. It copies the command and the names of the environment variables the server reads, never their values.
 
@@ -41,6 +41,12 @@ Tool arguments are what the agent **sends**, so they follow request rules. Struc
 | Output schema removed | 🟡 warning | Structured results may stop |
 | MCP protocol version changed | 🟡 warning | Clients may need an update |
 | New tool, new optional argument, output schema added, server version changed, risk hints narrowed | ⚪ info | |
+| Prompt removed, new required prompt argument, prompt argument now required | 🔴 breaking | Whatever invokes the prompt by name or with arguments fails |
+| Resource template removed | 🔴 breaking | Agents build URIs from templates |
+| Prompt argument removed, listed resource gone, resource MIME type changed | 🟡 warning | Listed resources often change with data, so a missing one is not breaking |
+| New prompt, argument, resource or template; prompt description changed | ⚪ info | |
+
+Prompts and resources are listed only when the server advertises those capabilities in `initialize`; a list method the server doesn't answer is skipped. Baselines recorded before 0.4 have no prompts or resources, so nothing is reported for them until `apimend snapshot` (or `accept`) records them.
 
 Annotation hints use MCP's defaults when absent (`readOnlyHint: false`, `destructiveHint: true`, `openWorldHint: true`, `idempotentHint: false`), so a server that starts stating `destructiveHint: false` is reported as narrowing, not as noise.
 
@@ -69,6 +75,5 @@ The example is a small stdio server for shipping tools. Its v2 renames `track_pa
 
 ## Limits
 
-- Only tools are compared today; prompts and resources are not.
 - Renames are detected from identical argument schemas or descriptions plus name similarity, and always need review.
 - Changes to a tool's behavior that its schema and description don't show can't be detected from the tool list. Add a recorded response under `endpoints:` if you can call the tool through an HTTP API.

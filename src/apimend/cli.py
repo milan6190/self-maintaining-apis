@@ -11,7 +11,7 @@ from typing import Any
 from . import __version__
 from .config import DEFAULT_CONFIG, STARTER, Api, Config, ConfigError, Endpoint, load_config
 from .diff import BREAKING, RESPONSE, WARNING, Change, FieldDiff, diff_fields, diff_specs
-from .fetch import FetchError, fetch_json
+from .fetch import FetchError, fetch_json_with_headers
 from .gql import check as gql_check
 from .gql.operations import expand_patterns
 from .mcp import diff_tools, load_server
@@ -21,6 +21,7 @@ from .report import ApiResult, Report, to_sarif
 from .schema import collect_values, flatten_samples, infer
 from .store import BASELINE, CURRENT, Store
 from .verify import verify_plan
+from .signals import keep_headers, signal_changes
 from .waivers import apply_waivers, waiver_notes
 
 EXIT_OK, EXIT_DRIFT, EXIT_ERROR = 0, 1, 2
@@ -37,7 +38,8 @@ def _err(msg: str) -> None:
 # ------------------------------------------------------------------ data access
 
 
-def collect_samples(cfg: Config, ep: Endpoint) -> list[Any]:
+def collect_samples(cfg: Config, ep: Endpoint, signals: dict | None = None) -> list[Any]:
+    """Samples for ``ep``; for live calls, deprecation headers are put into ``signals``."""
     if ep.samples:
         files = ep.sample_files(cfg.base)
         if not files:
@@ -50,7 +52,11 @@ def collect_samples(cfg: Config, ep: Endpoint) -> list[Any]:
                 raise FetchError(f"{f} is not valid JSON: {e}") from e
         return out
     assert ep.url
-    return [fetch_json(ep.url, method=ep.method, headers=ep.headers, body=ep.body, timeout=ep.timeout)]
+    body, headers = fetch_json_with_headers(ep.url, method=ep.method, headers=ep.headers, body=ep.body,
+                                            timeout=ep.timeout)
+    if signals is not None:
+        signals.update(keep_headers(headers))
+    return [body]
 
 
 def pull(cfg: Config, store: Store, api: Api, kind: str, append: bool = False) -> list[str]:
@@ -69,8 +75,11 @@ def pull(cfg: Config, store: Store, api: Api, kind: str, append: bool = False) -
             errors.append(f"{'graphql' if api.graphql else 'mcp' if api.mcp else 'spec'}: {e}")
     for ep in api.endpoints:
         try:
-            samples = collect_samples(cfg, ep)
+            signals: dict[str, str] = {}
+            samples = collect_samples(cfg, ep, signals)
             store.save_samples(kind, api.name, ep.name, samples, append=append)
+            if not ep.samples:
+                store.save_signals(kind, api.name, ep.name, signals)
         except FetchError as e:
             errors.append(f"{ep.name}: {e}")
     return errors
@@ -144,6 +153,10 @@ def cmd_snapshot(args) -> int:
         doc = store.load_spec(BASELINE, api.name) if api.has_schema else None
         if doc is not None and kind_of(doc) == "mcp":
             parts.append(f"{len(doc.get('tools') or {})} tool(s)")
+            for key, label in (("prompts", "prompt(s)"), ("resourceTemplates", "resource template(s)"),
+                               ("resources", "resource(s)")):
+                if doc.get(key):
+                    parts.append(f"{len(doc[key])} {label}")
         elif doc is not None:
             parts.append("schema" if kind_of(doc) == "graphql" else "spec")
         if api.endpoints:
@@ -186,6 +199,8 @@ def run_check(cfg: Config, apis: list[Api], refresh: bool = True) -> Report:
             fd = endpoint_diff(store, api.name, ep.name)
             if fd is not None:
                 res.changes.extend(fd.changes)
+            res.changes.extend(signal_changes(ep.name, store.load_signals(CURRENT, api.name, ep.name),
+                                              store.load_signals(BASELINE, api.name, ep.name)))
     if cfg.waivers:
         for res in report.results:
             apply_waivers(cfg.waivers, res.name, res.changes)

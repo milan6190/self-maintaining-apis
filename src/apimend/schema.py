@@ -31,6 +31,7 @@ class Field:
     enum: tuple | None = None
     format: str | None = None
     ref: str | None = None  # named schema this field points to (when refs are not expanded)
+    deprecated: bool = False  # marked `deprecated: true` in the spec
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {"types": sorted(self.types), "required": self.required}
@@ -40,6 +41,8 @@ class Field:
             out["enum"] = list(self.enum)
         if self.format:
             out["format"] = self.format
+        if self.deprecated:
+            out["deprecated"] = True
         return out
 
 
@@ -309,7 +312,8 @@ def flatten(schema: Any, resolve: Resolver | None = None, root: str = ROOT,
         target, _ = _deref(s, resolve, ())
         types = set(_schema_types(target)) if isinstance(target, dict) else set()
         types |= set(extra_types)
-        _put(path, Field(frozenset(_normalize_types(types)), required, ref=ref_name(s["$ref"])))
+        _put(path, Field(frozenset(_normalize_types(types)), required, ref=ref_name(s["$ref"]),
+                         deprecated=bool(s.get("deprecated"))))
 
     def _put(path: str, f: Field) -> None:
         if path in out:  # same path reached twice (anyOf items): widen
@@ -320,6 +324,7 @@ def flatten(schema: Any, resolve: Resolver | None = None, root: str = ROOT,
                 None if prev.enum is None or f.enum is None else tuple(dict.fromkeys(prev.enum + f.enum)),
                 prev.format or f.format,
                 prev.ref or f.ref,
+                prev.deprecated and f.deprecated,
             )
         out[path] = f
 
@@ -359,7 +364,8 @@ def flatten(schema: Any, resolve: Resolver | None = None, root: str = ROOT,
         if s.get("nullable") and types:
             types.add("null")
         enum = tuple(s["enum"]) if "enum" in s else None
-        _put(path, Field(frozenset(_normalize_types(types)), required, enum, s.get("format"), ref_label))
+        _put(path, Field(frozenset(_normalize_types(types)), required, enum, s.get("format"), ref_label,
+                         bool(s.get("deprecated"))))
         if "object" in types or (not types and "properties" in s):
             req = set(s.get("required", []))
             for name, sub in s.get("properties", {}).items():

@@ -168,3 +168,34 @@ def test_streamable_http_server_with_sse_and_pagination():
         srv.shutdown()
     assert set(doc["tools"]) == {"first", "second"}
     assert _McpHandler.sessions[0] is None and set(_McpHandler.sessions[1:]) == {"abc"}
+
+
+def test_prompts_and_resource_templates_from_the_example_server(monkeypatch):
+    monkeypatch.delenv("TOOLS_VERSION", raising=False)
+    v1 = list_tools_stdio([sys.executable, SERVER])
+    monkeypatch.setenv("TOOLS_VERSION", "v2")
+    v2 = list_tools_stdio([sys.executable, SERVER], env={"TOOLS_VERSION": "v2"})
+    assert set(v1["prompts"]) == {"delay_apology"} and len(v1["resourceTemplates"]) == 2
+    assert "resources" not in v1  # the server doesn't answer resources/list; that's skipped, not an error
+    ch = diff_tools(v1, v2)
+    assert ("required-argument-added", "breaking") in kinds(ch)
+    assert ("resource-template-removed", "breaking") in kinds(ch)
+
+
+def test_prompt_and_resource_rules():
+    from apimend.mcp import diff_prompts, diff_resources
+    old = from_tool_list({"tools": [], "prompts": [{"name": "p", "arguments": [{"name": "a"}, {"name": "b"}]},
+                                                    {"name": "gone"}],
+                          "resources": [{"uri": "file:///a", "mimeType": "text/plain"}, {"uri": "file:///b"}]})
+    new = from_tool_list({"tools": [], "prompts": [{"name": "p", "arguments": [{"name": "a", "required": True}]}],
+                          "resources": [{"uri": "file:///a", "mimeType": "text/markdown"}]})
+    pk = kinds(diff_prompts(old, new))
+    assert {("prompt-removed", "breaking"), ("now-required", "breaking"), ("argument-removed", "warning")} <= pk
+    rk = kinds(diff_resources(old, new))
+    assert rk == {("resource-removed", "warning"), ("mime-type-changed", "warning")}
+
+
+def test_baselines_without_prompts_are_not_flagged():
+    old = from_tool_list({"tools": [tool("x")]})
+    new = from_tool_list({"tools": [tool("x")], "prompts": [{"name": "p"}]})
+    assert diff_tools(old, new) == []

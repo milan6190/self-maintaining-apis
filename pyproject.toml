@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "apimend"
-version = "0.3.0"
+version = "0.4.0"
 description = "Find the APIs and agent tools your code depends on, then detect, repair and verify drift in them (REST, GraphQL, MCP)."
 readme = "README.md"
 requires-python = ">=3.10"

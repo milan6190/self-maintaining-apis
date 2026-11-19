@@ -4,7 +4,10 @@
 It stands in for a shipping-tools server your agents use. TOOLS_VERSION=v2
 plays the part of the vendor shipping an update: a tool is renamed, one gains a
 required argument, an output field is renamed, a description picks up an
-instruction to the model, and a read-only tool starts writing.
+instruction to the model, and a read-only tool starts writing. A prompt gains a
+required argument and a resource template goes away. `resources/list` is
+deliberately not implemented, to show that apimend skips optional lists a
+server can't answer.
 """
 
 import json
@@ -68,9 +71,26 @@ V2 = [
 ]
 
 
+PROMPTS_V1 = [
+    {"name": "delay_apology", "description": "Draft a message to a customer about a late shipment.",
+     "arguments": [{"name": "tracking_number", "required": True}, {"name": "tone"}]},
+]
+PROMPTS_V2 = [
+    {"name": "delay_apology", "description": "Draft a message to a customer about a late shipment.",
+     "arguments": [{"name": "tracking_number", "required": True}, {"name": "tone"},
+                   {"name": "locale", "required": True}]},
+]
+TEMPLATES_V1 = [
+    {"uriTemplate": "shipments://{tracking_number}/label", "name": "Shipping label", "mimeType": "application/pdf"},
+    {"uriTemplate": "shipments://{tracking_number}/events", "name": "Tracking events", "mimeType": "application/json"},
+]
+TEMPLATES_V2 = TEMPLATES_V1[:1]  # the events feed is gone
+
+
 def main() -> None:
     tools = V2 if os.environ.get("TOOLS_VERSION") == "v2" else V1
-    version = "2.0.0" if tools is V2 else "1.4.2"
+    v2 = tools is V2
+    version = "2.0.0" if v2 else "1.4.2"
     for line in sys.stdin:
         try:
             msg = json.loads(line)
@@ -79,10 +99,14 @@ def main() -> None:
         if "id" not in msg:
             continue  # notifications
         if msg.get("method") == "initialize":
-            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
                       "serverInfo": {"name": "shipping-tools", "version": version}}
         elif msg.get("method") == "tools/list":
             result = {"tools": tools}
+        elif msg.get("method") == "prompts/list":
+            result = {"prompts": PROMPTS_V2 if v2 else PROMPTS_V1}
+        elif msg.get("method") == "resources/templates/list":
+            result = {"resourceTemplates": TEMPLATES_V2 if v2 else TEMPLATES_V1}
         else:
             reply = {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "method not found"}}
             print(json.dumps(reply), flush=True)

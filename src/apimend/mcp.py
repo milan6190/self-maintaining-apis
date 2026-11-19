@@ -85,8 +85,31 @@ def from_tool_list(doc: Any, server: dict | None = None) -> dict:
                 entry[key] = t[key]
         tools[t["name"]] = entry
     out: dict[str, Any] = {"x-apimend": MARKER, "tools": tools}
+    src = doc["result"] if isinstance(doc, dict) and isinstance(doc.get("result"), dict) else doc
+    if isinstance(src, dict):
+        out.update(_normalize_extras(src))
     if server:
         out["server"] = server
+    return out
+
+
+def _normalize_extras(src: dict) -> dict:
+    """Prompts, resources and resource templates, keyed by name or URI."""
+    out: dict[str, Any] = {}
+    if isinstance(src.get("prompts"), list):
+        prompts = {}
+        for p in src["prompts"]:
+            if isinstance(p, dict) and isinstance(p.get("name"), str):
+                args = {a["name"]: {"required": bool(a.get("required")),
+                                    **({"description": a["description"]} if a.get("description") else {})}
+                        for a in p.get("arguments") or [] if isinstance(a, dict) and isinstance(a.get("name"), str)}
+                prompts[p["name"]] = {"arguments": args,
+                                      **({"description": p["description"]} if p.get("description") else {})}
+        out["prompts"] = prompts
+    for key, id_key in (("resources", "uri"), ("resourceTemplates", "uriTemplate")):
+        if isinstance(src.get(key), list):
+            out[key] = {r[id_key]: {k: r[k] for k in ("name", "mimeType") if isinstance(r.get(k), str)}
+                        for r in src[key] if isinstance(r, dict) and isinstance(r.get(id_key), str)}
     return out
 
 
@@ -118,16 +141,33 @@ def _result(msg: dict, what: str) -> dict:
     return res
 
 
-def _list_all(call) -> list:
-    tools: list = []
+def _list_all(call, method: str = "tools/list", key: str = "tools") -> list:
+    items: list = []
     cursor = None
     for _ in range(MAX_PAGES):
-        res = call("tools/list", {"cursor": cursor} if cursor else {})
-        tools.extend(res.get("tools") or [])
+        res = call(method, {"cursor": cursor} if cursor else {})
+        items.extend(res.get(key) or [])
         cursor = res.get("nextCursor")
         if not cursor:
             break
-    return tools
+    return items
+
+
+def _collect(call, init: dict) -> dict:
+    """Tools always; prompts and resources when the server says it has them."""
+    caps = init.get("capabilities") if isinstance(init.get("capabilities"), dict) else {}
+    out: dict[str, Any] = {"tools": _list_all(call)}
+    wanted = []
+    if "prompts" in caps:
+        wanted.append(("prompts/list", "prompts"))
+    if "resources" in caps:
+        wanted += [("resources/list", "resources"), ("resources/templates/list", "resourceTemplates")]
+    for method, key in wanted:
+        try:
+            out[key] = _list_all(call, method, key)
+        except FetchError:
+            pass  # optional; some servers advertise a capability without every list method
+    return from_tool_list(out, _server_info(init))
 
 
 def _server_info(init: dict) -> dict:
@@ -198,7 +238,7 @@ def list_tools_stdio(command: str | list[str], env: dict | None = None, cwd: str
             send(_request(i, method, params))
             return wait_for(i, method)
 
-        return from_tool_list({"tools": _list_all(call)}, _server_info(init))
+        return _collect(call, init)
     finally:
         try:
             if proc.stdin:
@@ -288,7 +328,7 @@ def list_tools_http(url: str, headers: dict | None = None, timeout: float = 30.0
             raise FetchError(f"{url}: no answer to {method}")
         return _result(m, method)
 
-    return from_tool_list({"tools": _list_all(call)}, _server_info(init))
+    return _collect(call, init)
 
 
 def load_server(source: str | list[str], headers: dict | None = None, env: dict | None = None,
@@ -413,6 +453,9 @@ def diff_tools(old_doc: dict, new_doc: dict, prefix: str = "") -> list[Change]:
                 changes.append(Change(INFO, "tool-permissions-narrowed", loc, ROOT,
                                       f"`{key}` changed {_b(oa[key])} → {_b(na[key])}", old=oa[key], new=na[key]))
 
+    changes.extend(diff_prompts(old_doc, new_doc, prefix))
+    changes.extend(diff_resources(old_doc, new_doc, prefix))
+
     os_, ns = old_doc.get("server") or {}, new_doc.get("server") or {}
     if os_.get("version") and ns.get("version") and os_["version"] != ns["version"]:
         changes.append(Change(INFO, "server-version-changed", f"{prefix}server", ROOT,
@@ -433,3 +476,60 @@ _RISK_WORDS = {
     "openWorldHint": "reaching outside systems",
     "idempotentHint": "not safe to retry",
 }
+
+
+def diff_prompts(old_doc: dict, new_doc: dict, prefix: str = "") -> list[Change]:
+    """Prompts are templates that users or agents invoke by name with arguments."""
+    if "prompts" not in old_doc or "prompts" not in new_doc:
+        return []  # not recorded on one side (older baseline, or the server stopped listing them)
+    old, new = old_doc["prompts"], new_doc["prompts"]
+    changes: list[Change] = []
+    for name in sorted(set(old) - set(new)):
+        changes.append(Change(BREAKING, "prompt-removed", f"{prefix}prompt {name}", ROOT,
+                              f"prompt `{name}` was removed"))
+    for name in sorted(set(new) - set(old)):
+        changes.append(Change(INFO, "prompt-added", f"{prefix}prompt {name}", ROOT, f"new prompt `{name}`"))
+    for name in sorted(set(old) & set(new)):
+        loc = f"{prefix}prompt {name}"
+        oa, na = old[name].get("arguments") or {}, new[name].get("arguments") or {}
+        for a in sorted(set(na) - set(oa)):
+            if na[a].get("required"):
+                changes.append(Change(BREAKING, "required-argument-added", loc, a,
+                                      f"prompt `{name}` has a new required argument `{a}`"))
+            else:
+                changes.append(Change(INFO, "argument-added", loc, a, f"prompt `{name}` has a new argument `{a}`"))
+        for a in sorted(set(oa) - set(na)):
+            changes.append(Change(WARNING, "argument-removed", loc, a,
+                                  f"prompt `{name}` no longer takes argument `{a}`"))
+        for a in sorted(set(oa) & set(na)):
+            if na[a].get("required") and not oa[a].get("required"):
+                changes.append(Change(BREAKING, "now-required", loc, a,
+                                      f"argument `{a}` of prompt `{name}` is now required"))
+        od, nd = (old[name].get("description") or "").strip(), (new[name].get("description") or "").strip()
+        if od != nd:
+            changes.append(Change(INFO, "prompt-description-changed", loc, ROOT,
+                                  f"the description changed: “{_short(od, 60)}” → “{_short(nd, 60)}”"))
+    return changes
+
+
+def diff_resources(old_doc: dict, new_doc: dict, prefix: str = "") -> list[Change]:
+    """Resource templates are a contract (agents build URIs from them); listed resources
+    come and go with data, so a missing one is a warning."""
+    changes: list[Change] = []
+    for key, label, kind, gone_sev in (("resourceTemplates", "resource template", "resource-template", BREAKING),
+                                       ("resources", "resource", "resource", WARNING)):
+        if key not in old_doc or key not in new_doc:
+            continue
+        old, new = old_doc[key], new_doc[key]
+        for uri in sorted(set(old) - set(new)):
+            changes.append(Change(gone_sev, f"{kind}-removed",
+                                  f"{prefix}{label} {uri}", ROOT, f"{label} `{uri}` is no longer listed"))
+        for uri in sorted(set(new) - set(old)):
+            changes.append(Change(INFO, f"{kind}-added",
+                                  f"{prefix}{label} {uri}", ROOT, f"new {label} `{uri}`"))
+        for uri in sorted(set(old) & set(new)):
+            om, nm = old[uri].get("mimeType"), new[uri].get("mimeType")
+            if om and nm and om != nm:
+                changes.append(Change(WARNING, "mime-type-changed", f"{prefix}{label} {uri}", ROOT,
+                                      f"{label} `{uri}` changed type {om} → {nm}", old=om, new=nm))
+    return changes

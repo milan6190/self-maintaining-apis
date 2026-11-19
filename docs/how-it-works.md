@@ -36,6 +36,23 @@ After each round, the new shape is rewritten in old names and diffed again, so r
 
 **Sample-based caution**: a field looking optional because one sample omitted it is `info`, not `warning`, since sampling can't prove it.
 
+## 3a. Seeing removals coming
+
+Most removals are announced first. apimend reports the announcement as a warning, so you have the whole deprecation window to react:
+
+| Signal | Where | Reported as |
+| --- | --- | --- |
+| `deprecated: true` newly on an operation, parameter or schema property | the spec | 🟡 `operation-deprecated`, `param-deprecated`, `field-deprecated` |
+| `x-sunset: 2027-03-01` on an operation (a common extension) | the spec | 🟡 included in the deprecation, or `sunset-scheduled` when added later |
+| `Deprecation` header (RFC 9745: `@1735689600`; older `true` or a date) | live responses | 🟡 `endpoint-deprecated`, with the date |
+| `Sunset` header (RFC 8594) | live responses | 🟡 `sunset-scheduled` with days left ("soon" within 30 days); 🔴 `sunset-passed` once the date is past |
+| `Link` with `rel="deprecation"`, `"sunset"` or `"successor-version"` | live responses | the URL is added to the message |
+| `Warning: 299 ...` | live responses | 🟡 `deprecation-notice` |
+
+Spec deprecations are changes, so they are reported once, when they appear. Header signals describe a deadline, so they are reported on every check while the provider sends them, and say whether they are new since the baseline. Accept one you're already handling with a waiver (`kind: sunset-scheduled`, with an expiry before the sunset date). Removing an operation that was already deprecated is still breaking; the message says it was deprecated.
+
+Headers are stored next to the samples (`.apimend/<baseline|current>/<api>/signals/<endpoint>.json`); only these four headers are kept.
+
 ## 4. Healing
 
 From a live-sample diff, `heal` emits:

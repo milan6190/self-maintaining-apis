@@ -20,13 +20,14 @@ flowchart LR
 - **Scan:** one command reads your repo (code, config, specs, GraphQL operations, Postman collections, dependencies) and writes the config. It knows where well-known providers publish their specs, so APIs like Stripe and GitHub need no setup at all.
 - **REST:** compares OpenAPI 3.x and Swagger 2.0 specs (single or multi-file) and real JSON responses against a baseline.
 - **GraphQL:** compares schemas (SDL, introspection JSON, or a live endpoint) and checks **the queries your code actually sends** against them, so you see which of your operations a change breaks.
-- **Agent tools (MCP):** records the tools an MCP server offers your agents and reports removed or renamed tools, new required arguments, changed outputs, and the agent-only risks: changed descriptions and tools that stop being read-only.
+- **Agent tools (MCP):** records the tools, prompts and resource templates an MCP server offers your agents and reports removed or renamed tools, new required arguments, changed outputs, and the agent-only risks: changed descriptions and tools that stop being read-only.
+- **Early warning:** deprecations in specs and `Deprecation`/`Sunset` headers on live responses are reported as soon as they appear, with the days left before removal.
 - **Repair:** renamed response fields are mapped back at runtime. Renamed GraphQL fields are fixed with aliases, so your code reads the same keys.
 - **Verify:** proves a repair works by replaying recorded responses and re-validating every query.
 - **Built for rollout:** owners per API, expiring waivers with reasons, SARIF for code-scanning dashboards, and an org-wide rollup.
 - **Runs anywhere:** a CLI, a Python library, and a GitHub Action. It's pure Python with one dependency (PyYAML), and runs entirely in your CI.
 
-> Status: alpha (0.3). The core loop is tested against real APIs (see [Tested on real APIs](#tested-on-real-apis)); config and plan formats may still change.
+> Status: alpha (0.4). The core loop is tested against real APIs (see [Tested on real APIs](#tested-on-real-apis)); config and plan formats may still change.
 
 ## Quick start
 
@@ -253,6 +254,10 @@ The report is added to the job summary. The `breaking`, `warning` and `report` o
 | New enum values / union variants | 🟡 warning | ⚪ info |
 | Enum values / union variants removed | ⚪ info | 🔴 breaking |
 | Operation removed / required parameter added | 🔴 breaking | 🔴 breaking |
+| Operation, parameter or field newly deprecated | 🟡 warning | 🟡 warning |
+| `Deprecation` / `Sunset` headers on a live call | 🟡 warning; 🔴 once the sunset date has passed | |
+
+Deprecations come before removals, so apimend reports them as soon as they appear: in the spec (`deprecated: true`, `x-sunset`), and in the `Deprecation`, `Sunset`, `Link` and `Warning: 299` headers of the live endpoints you call ([details](docs/how-it-works.md#3a-seeing-removals-coming)).
 
 **GraphQL** follows the reference implementation's rules (`findBreakingChanges` / `findDangerousChanges`), plus: a removed field that looks renamed is reported as a rename, and new deprecations are warnings, because they usually come before a removal. Any operation of yours that stops validating is breaking.
 
@@ -272,15 +277,16 @@ The full rules are in [docs/how-it-works.md](docs/how-it-works.md).
 - REST plans repair JSON response bodies; request-side changes are reported, not rewritten. GraphQL fixes rewrite field and argument names in your queries.
 - Scan finds URLs written in code and config; URLs assembled entirely at runtime (`f"{BASE}/{path}"` with `BASE` from a secret store) are found only through their base-URL settings.
 - Live checks call the `GET` endpoints you configure. Keep them read-only.
-- MCP: tools are compared, not prompts or resources; a tool's behavior is only seen through its schema and description.
+- MCP: a tool's behavior is only seen through its schema and description.
+- Deprecation headers are read from live calls only, not from recorded `samples:`.
 - GraphQL subscriptions are validated but not executed. Plans don't support path keys containing `.` or `[`.
 
 ## Roadmap
 
-- MCP prompts and resources, and repair suggestions for renamed tools
+- Repair suggestions for renamed MCP tools (agent configs, allowlists, prompts)
 - More providers in the scan registry (contributions welcome: [src/apimend/registry.py](src/apimend/registry.py))
 - Request-side healing (rewriting outgoing payloads)
-- Changelog and deprecation-notice monitoring
+- Provider changelog monitoring (deprecation headers and spec deprecations are covered since 0.4)
 - A runtime proxy that heals traffic without code changes
 
 The thinking behind the project is in [docs/brainstorm.md](docs/brainstorm.md).
