@@ -22,6 +22,7 @@ jobs:
         run: |
           ./examples/petstore/demo.sh
           ./examples/graphql-shop/demo.sh
+          ./examples/agent-tools/demo.sh
       - name: Scan the sample company repo
         run: |
           cd examples/scan-demo/acme-app
@@ -46,7 +47,9 @@ jobs:
         with:
           working-directory: examples/petstore
           heal: "true"
+          sarif: "true"
       - name: The action must report breaking drift
         run: |
           test "${{ steps.drift.outcome }}" = "failure"
           test "${{ steps.drift.outputs.breaking }}" -gt 0
+          python -c "import json,sys; assert json.load(open(sys.argv[1]))['runs'][0]['results']" "${{ steps.drift.outputs.sarif }}"

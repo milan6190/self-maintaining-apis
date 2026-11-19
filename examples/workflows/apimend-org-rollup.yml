@@ -1,0 +1,52 @@
+# Put this in a platform-team repository. Every Monday it collects the latest
+# apimend report from each repository's nightly job (examples/workflows/apimend-nightly.yml,
+# which uploads an artifact named "apimend") and publishes one org-wide view.
+name: API drift rollup
+
+on:
+  schedule:
+    - cron: "41 12 * * 1"   # Mondays, 12:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  rollup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet git+https://github.com/milan6190/self-maintaining-apis.git
+
+      - name: Download each repository's latest report
+        env:
+          # a token that can read Actions artifacts across the org (fine-grained PAT or GitHub App)
+          GH_TOKEN: ${{ secrets.ORG_ACTIONS_READ_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          mkdir -p reports
+          for repo in $(gh repo list "$ORG" --limit 1000 --no-archived --json name -q '.[].name'); do
+            run=$(gh run list -R "$ORG/$repo" --workflow "API drift check" --status completed -L 1 \
+                    --json databaseId -q '.[0].databaseId' 2>/dev/null) || continue
+            [ -n "$run" ] || continue
+            gh run download "$run" -R "$ORG/$repo" -n apimend -D "reports/$repo/.apimend" 2>/dev/null || true
+          done
+
+      - name: Combine
+        run: |
+          apimend rollup reports/ -o rollup.md
+          apimend rollup reports/ --format json -o rollup.json
+          cat rollup.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the weekly summary as an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue create -R "${{ github.repository }}" --title "API drift: week of $(date +%F)" --body-file rollup.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-drift-rollup
+          path: rollup.*

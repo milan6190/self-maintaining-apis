@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from .waivers import Waiver, WaiverError, parse_waivers
+
 DEFAULT_CONFIG = "apimend.yaml"
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -66,10 +68,13 @@ class Api:
     endpoints: list[Endpoint] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)  # globs of the GraphQL operations you send
     only_used: bool = False  # report only schema changes that touch your operations
+    mcp: str | list[str] | None = None  # MCP server: an http(s) endpoint or a command that starts it over stdio
+    env: dict[str, str] = field(default_factory=dict)  # extra environment for an `mcp` command
+    owner: str | None = None  # team or person to route drift to
 
     @property
     def has_schema(self) -> bool:
-        return bool(self.spec or self.graphql)
+        return bool(self.spec or self.graphql or self.mcp)
 
 
 @dataclass
@@ -78,6 +83,7 @@ class Config:
     store: Path
     apis: list[Api]
     fail_on: str = "breaking"
+    waivers: list[Waiver] = field(default_factory=list)
 
     @property
     def base(self) -> Path:
@@ -152,15 +158,23 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
                 query=query,
                 variables=e.get("variables"),
             ))
-        if a.get("spec") and a.get("graphql"):
-            raise ConfigError(f"{name}: use `spec` (a schema file) or `graphql` (a live endpoint), not both")
+        if sum(bool(a.get(k)) for k in ("spec", "graphql", "mcp")) > 1:
+            raise ConfigError(f"{name}: use one of `spec` (a file or URL), `graphql` (a live endpoint) "
+                              "or `mcp` (an MCP server)")
+        mcp = a.get("mcp")
+        if mcp is not None and not (isinstance(mcp, str) and mcp.strip()
+                                    or isinstance(mcp, list) and mcp and all(isinstance(x, str) for x in mcp)):
+            raise ConfigError(f"{name}: `mcp` must be a URL, a command string, or a list of arguments")
         operations = a.get("operations") or []
         if isinstance(operations, str):
             operations = [operations]
         if operations and not (a.get("spec") or a.get("graphql")):
             raise ConfigError(f"{name}: `operations` needs a GraphQL `spec` or `graphql` endpoint")
-        if not a.get("spec") and not a.get("graphql") and not eps:
-            raise ConfigError(f"{name}: set a `spec`, a `graphql` endpoint, `endpoints`, or a combination")
+        if operations and mcp:
+            raise ConfigError(f"{name}: `operations` are GraphQL documents; they don't apply to `mcp`")
+        if not a.get("spec") and not a.get("graphql") and not mcp and not eps:
+            raise ConfigError(f"{name}: set a `spec`, a `graphql` endpoint, an `mcp` server, `endpoints`, "
+                              "or a combination")
         apis.append(Api(
             name=name,
             spec=a.get("spec"),
@@ -169,6 +183,9 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
             endpoints=eps,
             operations=[str(o) for o in operations],
             only_used=bool(a.get("only_used", False)),
+            mcp=mcp,
+            env={str(k): str(v) for k, v in (a.get("env") or {}).items()},
+            owner=str(a["owner"]) if a.get("owner") else None,
         ))
 
     fail_on = raw.get("fail_on", "breaking")
@@ -177,7 +194,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
     store = Path(raw.get("store", ".apimend"))
     if not store.is_absolute():
         store = path.parent / store
-    return Config(path=path, store=store, apis=apis, fail_on=fail_on)
+    try:
+        waivers = parse_waivers(raw.get("waivers"))
+    except WaiverError as e:
+        raise ConfigError(f"{path}: {e}") from e
+    return Config(path=path, store=store, apis=apis, fail_on=fail_on, waivers=waivers)
 
 
 STARTER = """\

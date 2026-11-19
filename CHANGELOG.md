@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-11-17)
+
+**Agent tools (MCP)**
+- `mcp:` watches an MCP server's tools: a stdio command (string or argument list, with `env:`) or a Streamable HTTP endpoint (JSON or SSE responses, sessions, `nextCursor` pagination). Saved `tools/list` results work as `spec:` and in `apimend diff`
+- Tool changes graded from the agent's side: removed and renamed tools, argument changes by request rules, `outputSchema` changes by response rules, changed descriptions and riskier annotation hints (`readOnlyHint`, `destructiveHint`, `openWorldHint`, `idempotentHint`) as warnings, protocol and server version changes
+- `apimend scan` finds MCP servers in `.mcp.json`, `.vscode/mcp.json`, `.cursor/mcp.json` and `claude_desktop_config.json`, keeping env var names but never their values
+- `examples/agent-tools`: a stdio server whose update breaks an agent
+
+**Rolling out across a company**
+- `waivers:` accept known changes with a required reason, optional owner and expiry; waived changes don't fail the check but stay in every report; expired, expiring and unused waivers are called out
+- `owner:` per API, carried into reports, SARIF and the rollup
+- `apimend check --format sarif` (SARIF 2.1.0) for GitHub code scanning and other dashboards; the action's new `sarif` input and output
+- `apimend rollup` combines `report.json` files from many repositories into one view by owner and API; an org rollup workflow example
+- [docs/adoption.md](docs/adoption.md): an adoption playbook with phases, metrics, governance and notes by industry
+
 ## 0.2.0 (2026-10-30)
 
 **Scan a codebase**

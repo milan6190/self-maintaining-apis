@@ -11,6 +11,8 @@ What it looks at (no network access, nothing is executed):
 * base URLs in config: ``.env`` files, ``*.properties``, ``application.yml``,
   ``appsettings.json``, docker-compose and other config files
 * Postman collections
+* MCP client configs (``.mcp.json``, ``.vscode/mcp.json``, ``.cursor/mcp.json``,
+  ``claude_desktop_config.json``): the tool servers your agents use
 * dependency manifests, matched against well-known API SDKs (``stripe``,
   ``@octokit/rest``, ``twilio``...)
 
@@ -24,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
@@ -47,6 +50,9 @@ SKIP_DIRS = {
     ".vscode", "bower_components", ".terraform", ".apimend", "site-packages", "Pods", "DerivedData", ".dart_tool",
     ".serverless", ".cache", ".parcel-cache", "out", "obj", "bin", ".yarn", ".pnpm-store", "third_party",
 }
+_ENV_REF_ONLY = re.compile(r"^[A-Za-z ]*\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+MCP_CONFIG_FILES = {".mcp.json", "mcp.json", "claude_desktop_config.json", "mcp_config.json"}
+MCP_HIDDEN_CONFIGS = (".vscode/mcp.json", ".cursor/mcp.json")  # inside directories the walk skips
 SKIP_FILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "pipfile.lock", "composer.lock",
               "gemfile.lock", "go.sum", "cargo.lock", "npm-shrinkwrap.json", "bun.lockb"}
 CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".kt", ".kts", ".scala", ".go", ".rb",
@@ -185,7 +191,7 @@ class FoundApi:
     key: str
     name: str = ""
     title: str = ""
-    kind: str = "rest"  # rest | openapi | graphql
+    kind: str = "rest"  # rest | openapi | graphql | mcp
     known: KnownApi | None = None
     spec: str | None = None  # spec file path (relative to the output) or URL
     graphql_url: str | None = None
@@ -195,6 +201,9 @@ class FoundApi:
     operations: list[str] = field(default_factory=list)  # globs
     operation_count: int = 0
     notes: list[str] = field(default_factory=list)
+    mcp: str | None = None  # command line or URL of an MCP server
+    mcp_env: list[str] = field(default_factory=list)  # names only; values stay out of the config
+    mcp_headers: dict[str, str] = field(default_factory=dict)  # values only when they are ${VAR} references
 
     @property
     def sources(self) -> list[str]:
@@ -213,6 +222,8 @@ class FoundApi:
             out.append("postman")
         if self.operations:
             out.append("operations")
+        if self.mcp:
+            out.append("mcp-config")
         return out
 
     @property
@@ -237,6 +248,7 @@ class FoundApi:
             "calls": len(self.calls), "methods": dict(methods),
             "base_urls": sorted({u for u, _ in self.bases}),
             "operations": self.operations, "operation_count": self.operation_count,
+            **({"mcp": self.mcp, "mcp_env": self.mcp_env} if self.mcp else {}),
             "evidence": [str(e) + f" ({e.detail})" for e in self.evidence[:20]],
             "notes": self.notes,
         }
@@ -282,9 +294,15 @@ def list_files(root: Path, max_files: int = 200_000) -> list[Path]:
                 rels.append(f if rel_dir == "." else os.path.join(rel_dir, f))
                 if len(rels) >= max_files:
                     break
+    for hidden in MCP_HIDDEN_CONFIGS:
+        if hidden not in rels and (root / hidden).is_file():
+            rels.append(hidden)
     out = []
     for rel in rels:
         parts = Path(rel).parts
+        if rel.replace(os.sep, "/") in MCP_HIDDEN_CONFIGS:
+            out.append(root / rel)
+            continue
         if any(p in SKIP_DIRS for p in parts[:-1]) or parts[-1].lower() in SKIP_FILES:
             continue
         name = parts[-1].lower()
@@ -461,6 +479,9 @@ class Scanner:
                 name in ("pyproject.toml", "pipfile", "setup.py", "setup.cfg", "go.mod", "gemfile", "pom.xml",
                          "build.gradle", "build.gradle.kts", "cargo.toml") or ext == ".csproj":
             self.scan_manifest(path, name)
+        if name in MCP_CONFIG_FILES:
+            self.scan_mcp_config(path)
+            return
         if ext in GRAPHQL_EXTS or ext == ".graphqls":
             self.scan_graphql_file(path)
             return
@@ -516,6 +537,46 @@ class Scanner:
                 api = self.api_for(f"known:{known.name}")
                 api.known = known
                 api.evidence.append(Evidence(self.rel(path), 0, f"dependency `{dep}`"))
+
+    def scan_mcp_config(self, path: Path) -> None:
+        """``{"mcpServers": {...}}`` (Claude, Cursor) or ``{"servers": {...}}`` (VS Code)."""
+        if self.is_fixture(path):
+            return
+        try:
+            data = json.loads(_read(path) or "")
+        except json.JSONDecodeError:
+            return
+        if not isinstance(data, dict):
+            return
+        servers = data.get("mcpServers") or data.get("servers") or {}
+        if not isinstance(servers, dict):
+            return
+        for key, srv in servers.items():
+            if not isinstance(srv, dict) or srv.get("disabled"):
+                continue
+            url = srv.get("url") or srv.get("serverUrl")
+            if isinstance(url, str) and url.startswith("http"):
+                target = url
+            elif isinstance(srv.get("command"), str):
+                args = [str(a) for a in srv.get("args") or [] if isinstance(a, (str, int, float))]
+                target = shlex.join([srv["command"], *args])
+            else:
+                continue  # an SSE-only or unusual entry
+            api = self.api_for(f"mcp:{key}")
+            api.kind = "mcp"
+            api.title = f"MCP server `{key}`"
+            api.name = _slug(str(key)) + ("" if str(key).lower().endswith(("mcp", "tools")) else "-mcp")
+            api.mcp = target
+            api.mcp_env = sorted(str(k) for k in (srv.get("env") or {}) if isinstance(srv.get("env"), dict))
+            headers = srv.get("headers") if isinstance(srv.get("headers"), dict) else {}
+            for h, v in sorted(headers.items()):
+                env = re.sub(r"[^A-Z0-9]+", "_", f"{key}_{h}".upper()).strip("_")
+                # keep `Bearer ${TOKEN}`-style references; never copy a literal secret
+                api.mcp_headers[str(h)] = v if isinstance(v, str) and _ENV_REF_ONLY.match(v) else \
+                    ("Bearer " if h.lower() == "authorization" else "") + f"${{{env}}}"
+            api.evidence.append(Evidence(self.rel(path), 0, f"mcp server `{key}`"))
+            if "${" in target:
+                api.notes.append("the command uses editor variables such as ${workspaceFolder}; replace them")
 
     def scan_graphql_file(self, path: Path) -> None:
         text = _read(path, MAX_SPEC_BYTES)
@@ -840,7 +901,7 @@ class Scanner:
                     owner.evidence.extend(api.evidence)
                     continue
             app_evidence = [e for e in api.evidence if not e.test]
-            if not api.known and not api.spec and not api.operations and not app_evidence:
+            if not api.known and not api.spec and not api.operations and not api.mcp and not app_evidence:
                 continue  # only seen in tests, fixtures, docs or CI
             if api.known:
                 api.title = api.known.title
@@ -865,7 +926,8 @@ class Scanner:
                         if not c.templated:
                             api.graphql_url = c.url
                             break
-            if not api.calls and not api.bases and not api.spec and not api.operations and not api.known:
+            if not api.calls and not api.bases and not api.spec and not api.operations and not api.known \
+                    and not api.mcp:
                 continue
             base, n = api.name or "api", 2
             api.name = base
@@ -1041,11 +1103,13 @@ def to_yaml(result: ScanResult, enable_live: bool = False, max_endpoints: int = 
             lines.append(f"  # {api.title}: {summary}")
             lines.extend(_api_block(api, commented=False, enable_live=enable_live, max_endpoints=max_endpoints))
         else:
-            live = api.kind == "graphql" and api.graphql_url or api.get_endpoints()
+            live = api.kind == "graphql" and api.graphql_url or api.mcp or api.get_endpoints()
             if enable_live and live:
                 ready += 1
                 lines.append(f"  # {api.title}: {summary}")
-                lines.append("  # Live checks enabled by --enable-live; add `headers:` if the API needs auth.")
+                lines.append("  # Enabled by --enable-live: apimend starts this server to list its tools."
+                             if api.mcp else
+                             "  # Live checks enabled by --enable-live; add `headers:` if the API needs auth.")
                 lines.extend(_api_block(api, commented=False, enable_live=True, max_endpoints=max_endpoints))
             else:
                 lines.append(f"  # {api.title}: {summary}")
@@ -1067,6 +1131,8 @@ def _summary(api: FoundApi) -> str:
         bits.append(f"{len(api.calls)} call(s) ({m}), e.g. {api.calls[0].where}")
     if api.bases:
         bits.append(f"base URL in {api.bases[0][1]}")
+    if api.mcp:
+        bits.append(f"configured in {api.evidence[0].file}" if api.evidence else "MCP server")
     deps = [e.detail.split("`")[1] for e in api.evidence if e.detail.startswith("dependency")]
     if deps:
         bits.append(f"depends on {', '.join(sorted(set(deps))[:3])}")
@@ -1078,6 +1144,10 @@ def _summary(api: FoundApi) -> str:
 
 
 def _todo(api: FoundApi) -> str:
+    if api.mcp:
+        names = api.mcp_env + re.findall(r"\$\{(\w+)\}", " ".join(api.mcp_headers.values()))
+        need = f"; it needs {', '.join(names)} set in the environment" if names else ""
+        return f"uncomment; apimend will start the server (or call its URL) to list its tools{need}"
     if api.kind == "graphql" and api.graphql_url and "{}" in api.graphql_url:
         return "fill in the {} parts of the URL, add auth headers if needed, then uncomment"
     if api.kind == "graphql":
@@ -1093,6 +1163,15 @@ def _env_name(api: FoundApi) -> str:
 
 def _api_block(api: FoundApi, commented: bool, enable_live: bool, max_endpoints: int) -> list[str]:
     out = [f"  - name: {api.name}"]
+    if api.mcp:
+        out.append(f"    mcp: {_q(api.mcp)}")
+        if api.mcp_headers:
+            c = "" if commented else "# "
+            out.append(f"    {c}headers:")
+            out.extend(f"    {c}  {h}: {_q(v)}" for h, v in api.mcp_headers.items())
+        if api.mcp_env:
+            out.append(f"    # the server reads {', '.join(api.mcp_env)} from the environment")
+        return out
     if api.spec:
         out.append(f"    spec: {_q(api.spec)}")
     elif api.kind == "graphql" and api.graphql_url:
@@ -1124,7 +1203,7 @@ def _api_block(api: FoundApi, commented: bool, enable_live: bool, max_endpoints:
 def summary_table(result: ScanResult) -> str:
     rows = [("API", "Type", "Found via", "Watch with", "Status")]
     for a in result.apis:
-        watch = "spec" if a.spec else ("introspection" if a.kind == "graphql" and a.graphql_url else
+        watch = "spec" if a.spec else "tools/list" if a.mcp else ("introspection" if a.kind == "graphql" and a.graphql_url else
                                        f"{len(a.get_endpoints())} live endpoint(s)" if a.get_endpoints() else "-")
         if a.operations:
             watch += f" + {a.operation_count or '?'} operation(s)"

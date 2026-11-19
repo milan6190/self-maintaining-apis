@@ -18,6 +18,9 @@ inputs:
   heal:
     description: Also generate repair plans after the check (true/false)
     default: "false"
+  sarif:
+    description: Also write a SARIF file for code scanning (true/false); its path is the `sarif` output
+    default: "false"
   python-version:
     description: Python version to use
     default: "3.12"
@@ -32,6 +35,9 @@ outputs:
   report:
     description: Path to the Markdown report
     value: ${{ steps.check.outputs.report }}
+  sarif:
+    description: Path to the SARIF file (when `sarif` is true)
+    value: ${{ steps.check.outputs.sarif }}
 
 runs:
   using: composite
@@ -52,6 +58,7 @@ runs:
         CONFIG: ${{ inputs.config }}
         FAIL_ON: ${{ inputs.fail-on }}
         HEAL: ${{ inputs.heal }}
+        SARIF: ${{ inputs.sarif }}
       run: |
         report="$RUNNER_TEMP/apimend-report.md"
         args=(-c "$CONFIG" check -o "$report")
@@ -71,6 +78,11 @@ runs:
         print(f"warning={s.get('warning', 0)}")
         EOF
         echo "report=$report" >> "$GITHUB_OUTPUT"
+        if [ "$SARIF" = "true" ] && [ "$rc" != "2" ]; then
+          sarif="$RUNNER_TEMP/apimend.sarif"
+          apimend -c "$CONFIG" check --offline --format sarif -o "$sarif" > /dev/null || true
+          echo "sarif=$sarif" >> "$GITHUB_OUTPUT"
+        fi
         if [ "$HEAL" = "true" ] && [ "$rc" != "2" ]; then
           apimend -c "$CONFIG" heal
         fi

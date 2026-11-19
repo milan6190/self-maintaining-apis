@@ -3,6 +3,7 @@
 * OpenAPI 3.x / Swagger 2.0 (JSON or YAML, one file or many): returned as a
   single document; ``$ref``s to other files or URLs are bundled in under
   ``x-apimend-bundled`` so later diffs work offline.
+* An MCP ``tools/list`` result: returned as the model in :mod:`apimend.mcp`.
 * GraphQL SDL (``.graphql``/``.gql``/``.graphqls``), an introspection result
   (JSON), or a live endpoint: returned as the model in :mod:`apimend.gql.model`.
 """
@@ -19,6 +20,7 @@ from urllib.parse import unquote, urljoin
 from .fetch import FetchError, http, is_url, parse_document
 from .gql.model import from_introspection, from_sdl, introspect, is_introspection, is_model
 from .gql.parser import GraphQLSyntaxError, document_kind
+from .mcp import from_tool_list, is_tools, looks_like_tool_list
 
 GRAPHQL_FILE_EXTS = (".graphql", ".gql", ".graphqls", ".sdl")
 BUNDLE_KEY = "x-apimend-bundled"
@@ -26,9 +28,11 @@ MAX_DOCUMENTS = 10000
 
 
 def kind_of(doc: Any) -> str:
-    """'graphql', 'openapi' or 'unknown'."""
+    """'graphql', 'openapi', 'mcp' or 'unknown'."""
     if is_model(doc):
         return "graphql"
+    if is_tools(doc):
+        return "mcp"
     if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc):
         return "openapi"
     return "unknown"
@@ -56,10 +60,12 @@ def load_spec(source: str, headers: dict | None = None, timeout: float = 30.0) -
     doc = parse_document(text, source)
     if is_introspection(doc):
         return from_introspection(doc)
-    if is_model(doc):
+    if is_model(doc) or is_tools(doc):
         return doc
+    if looks_like_tool_list(doc):
+        return from_tool_list(doc)
     if not isinstance(doc, dict) or kind_of(doc) != "openapi":
-        raise FetchError(f"{source} is not an OpenAPI, Swagger or GraphQL document")
+        raise FetchError(f"{source} is not an OpenAPI, Swagger, GraphQL or MCP tool-list document")
     return bundle(doc, source, headers=headers, timeout=timeout)
 
 

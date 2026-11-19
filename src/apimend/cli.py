@@ -14,12 +14,14 @@ from .diff import BREAKING, RESPONSE, WARNING, Change, FieldDiff, diff_fields, d
 from .fetch import FetchError, fetch_json
 from .gql import check as gql_check
 from .gql.operations import expand_patterns
+from .mcp import diff_tools, load_server
 from .heal import build_plan, merge_manual_ops
 from .specs import kind_of, load_graphql_endpoint, load_spec
-from .report import ApiResult, Report
+from .report import ApiResult, Report, to_sarif
 from .schema import collect_values, flatten_samples, infer
 from .store import BASELINE, CURRENT, Store
 from .verify import verify_plan
+from .waivers import apply_waivers, waiver_notes
 
 EXIT_OK, EXIT_DRIFT, EXIT_ERROR = 0, 1, 2
 
@@ -58,11 +60,13 @@ def pull(cfg: Config, store: Store, api: Api, kind: str, append: bool = False) -
         try:
             if api.graphql:
                 doc = load_graphql_endpoint(api.graphql, headers=api.headers)
+            elif api.mcp:
+                doc = load_server(api.mcp, headers=api.headers, env=api.env, cwd=str(cfg.base))
             else:
                 doc = load_spec(cfg.resolve(api.spec), headers=api.headers)
             store.save_spec(kind, api.name, doc)
         except FetchError as e:
-            errors.append(f"{'graphql' if api.graphql else 'spec'}: {e}")
+            errors.append(f"{'graphql' if api.graphql else 'mcp' if api.mcp else 'spec'}: {e}")
     for ep in api.endpoints:
         try:
             samples = collect_samples(cfg, ep)
@@ -111,6 +115,8 @@ def schema_changes(cfg: Config, api: Api, old: dict, new: dict) -> list[Change]:
                        f"the description changed format ({kind_of(old)} → {kind_of(new)}); re-run `apimend snapshot`")]
     if kind_of(new) == "graphql":
         return gql_check.check(old, new, operation_files(cfg, api), cfg.base, api.only_used).changes
+    if kind_of(new) == "mcp":
+        return diff_tools(old, new)
     return diff_specs(old, new)
 
 
@@ -135,11 +141,14 @@ def cmd_snapshot(args) -> int:
         errors = pull(cfg, store, api, BASELINE, append=args.append)
         n = sum(len(store.load_samples(BASELINE, api.name, e.name)) for e in api.endpoints)
         parts = []
-        if api.spec and store.load_spec(BASELINE, api.name) is not None:
-            parts.append("spec")
+        doc = store.load_spec(BASELINE, api.name) if api.has_schema else None
+        if doc is not None and kind_of(doc) == "mcp":
+            parts.append(f"{len(doc.get('tools') or {})} tool(s)")
+        elif doc is not None:
+            parts.append("schema" if kind_of(doc) == "graphql" else "spec")
         if api.endpoints:
             parts.append(f"{n} sample(s)")
-        _out(f"✓ {api.name}: baseline saved ({', '.join(parts) or 'nothing'})")
+        _out(f"{'✗' if errors else '✓'} {api.name}: baseline saved ({', '.join(parts) or 'nothing'})")
         for e in errors:
             failed = True
             _err(f"{api.name}: {e}")
@@ -151,7 +160,7 @@ def run_check(cfg: Config, apis: list[Api], refresh: bool = True) -> Report:
     store = Store(cfg.store)
     report = Report()
     for api in apis:
-        res = ApiResult(api.name)
+        res = ApiResult(api.name, owner=api.owner)
         report.results.append(res)
         if not store.has_baseline(api.name):
             res.errors.append("no baseline yet; run `apimend snapshot`")
@@ -177,6 +186,10 @@ def run_check(cfg: Config, apis: list[Api], refresh: bool = True) -> Report:
             fd = endpoint_diff(store, api.name, ep.name)
             if fd is not None:
                 res.changes.extend(fd.changes)
+    if cfg.waivers:
+        for res in report.results:
+            apply_waivers(cfg.waivers, res.name, res.changes)
+        report.notes.extend(waiver_notes(cfg.waivers, {a.name for a in apis}, len(apis) == len(cfg.apis)))
     return report
 
 
@@ -187,11 +200,14 @@ def cmd_check(args) -> int:
     data = report.to_dict()
     Store(cfg.store).write_report(data, md)
     if args.format == "json":
-        _out(json.dumps(data, indent=2))
+        text = json.dumps(data, indent=2)
+    elif args.format == "sarif":
+        text = json.dumps(to_sarif(report, cfg.path, show_info=not args.quiet), indent=2)
     else:
-        _out(md)
+        text = md
+    _out(text)
     if args.output:
-        Path(args.output).write_text(json.dumps(data, indent=2) if args.format == "json" else md, encoding="utf-8")
+        Path(args.output).write_text(text, encoding="utf-8")
     if report.errors:
         return EXIT_ERROR
     fail_on = args.fail_on or cfg.fail_on
@@ -355,6 +371,8 @@ def cmd_diff(args) -> int:
     if kind_of(new) == "graphql":
         files = expand_patterns(args.operations, Path.cwd()) if args.operations else []
         changes = gql_check.check(old, new, files, Path.cwd()).changes
+    elif kind_of(new) == "mcp":
+        changes = diff_tools(old, new)
     else:
         changes = diff_specs(old, new)
     report = Report([ApiResult(f"{args.old} → {args.new}", changes)])
@@ -406,6 +424,29 @@ def cmd_scan(args) -> int:
     if ready:
         _out("Next: `apimend snapshot` to record a baseline, then `apimend check` (locally or in CI).")
     return EXIT_OK
+
+
+def cmd_rollup(args) -> int:
+    from .rollup import load_rows, to_dict, to_markdown
+
+    paths: list[Path] = []
+    for raw in args.reports:
+        p = Path(raw)
+        if p.is_dir():
+            paths.extend(sorted(p.glob("**/.apimend/report.json")) or sorted(p.glob("**/report.json")))
+        else:
+            paths.append(p)
+    if not paths:
+        _err("no report.json files found")
+        return EXIT_ERROR
+    rows, problems = load_rows(paths)
+    text = json.dumps(to_dict(rows, problems), indent=2) if args.format == "json" else to_markdown(rows, problems)
+    _out(text)
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+    if args.fail_on == "breaking" and any(r.breaking for r in rows):
+        return EXIT_DRIFT
+    return EXIT_ERROR if problems and not rows else EXIT_OK
 
 
 def cmd_infer(args) -> int:
@@ -470,7 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("check", help="compare the live API with the baseline")
     s.add_argument("api", nargs="*")
-    s.add_argument("--format", choices=["md", "json"], default="md")
+    s.add_argument("--format", choices=["md", "json", "sarif"], default="md",
+                   help="sarif uploads to GitHub code scanning and other security dashboards")
     s.add_argument("-o", "--output", help="also write the report to this file")
     s.add_argument("--fail-on", choices=["breaking", "warning", "never"])
     s.add_argument("--offline", action="store_true", help="reuse stored current data instead of fetching")
@@ -512,6 +554,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--include-local", action="store_true", help="keep localhost URLs")
     s.add_argument("--snapshot", action="store_true", help="record a baseline right after writing the config")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("rollup", help="combine report.json files from many repos into one org-wide view")
+    s.add_argument("reports", nargs="+", help="report.json files, or directories to search")
+    s.add_argument("--format", choices=["md", "json"], default="md")
+    s.add_argument("-o", "--output")
+    s.add_argument("--fail-on", choices=["breaking", "never"], default="never")
+    s.set_defaults(func=cmd_rollup)
 
     s = sub.add_parser("infer", help="print the JSON Schema inferred from sample files")
     s.add_argument("files", nargs="+")
