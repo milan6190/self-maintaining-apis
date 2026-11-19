@@ -28,6 +28,12 @@ def is_url(source: str) -> bool:
 
 def http(url: str, *, method: str = "GET", headers: dict | None = None, body: Any = None,
          timeout: float = 30.0) -> str:
+    return http_response(url, method=method, headers=headers, body=body, timeout=timeout)[0]
+
+
+def http_response(url: str, *, method: str = "GET", headers: dict | None = None, body: Any = None,
+                  timeout: float = 30.0) -> tuple[str, list[tuple[str, str]]]:
+    """The body and the response headers."""
     data = None
     hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json, application/yaml;q=0.9, */*;q=0.5"}
     hdrs.update(headers or {})
@@ -39,13 +45,14 @@ def http(url: str, *, method: str = "GET", headers: dict | None = None, body: An
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read(MAX_BYTES + 1)
             charset = resp.headers.get_content_charset() or "utf-8"
+            resp_headers = list(resp.headers.items())
     except urllib.error.HTTPError as e:
         raise FetchError(f"{method} {url} returned HTTP {e.code}") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise FetchError(f"{method} {url} failed: {getattr(e, 'reason', e)}") from e
     if len(raw) > MAX_BYTES:
         raise FetchError(f"{url} is larger than {MAX_BYTES // (1024 * 1024)} MB")
-    return raw.decode(charset, errors="replace")
+    return raw.decode(charset, errors="replace"), resp_headers
 
 
 def parse_document(text: str, source: str = "") -> Any:
@@ -75,8 +82,13 @@ def load_document(source: str, headers: dict | None = None, timeout: float = 30.
 
 def fetch_json(url: str, *, method: str = "GET", headers: dict | None = None, body: Any = None,
                timeout: float = 30.0) -> Any:
-    text = http(url, method=method, headers=headers, body=body, timeout=timeout)
+    return fetch_json_with_headers(url, method=method, headers=headers, body=body, timeout=timeout)[0]
+
+
+def fetch_json_with_headers(url: str, *, method: str = "GET", headers: dict | None = None, body: Any = None,
+                            timeout: float = 30.0) -> tuple[Any, list[tuple[str, str]]]:
+    text, resp_headers = http_response(url, method=method, headers=headers, body=body, timeout=timeout)
     try:
-        return json.loads(text)
+        return json.loads(text), resp_headers
     except json.JSONDecodeError as e:
         raise FetchError(f"{method} {url} did not return JSON") from e

@@ -2,6 +2,7 @@
 
     baseline/<api>/spec.json       (spec.json.gz when larger than 1 MB)
     baseline/<api>/samples/<endpoint>/0001.json
+    baseline/<api>/signals/<endpoint>.json   Deprecation/Sunset headers seen on live calls
     current/<api>/...              same layout, refreshed by `apimend check`
     plans/<api>/<endpoint>.json    repair plans written by `apimend heal`
     graphql-fixes/<api>.json       GraphQL operation edits (+ a .patch to review)
@@ -74,6 +75,19 @@ class Store:
     def load_samples(self, kind: str, api: str, endpoint: str) -> list[Any]:
         d = self.samples_dir(kind, api, endpoint)
         return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(d.glob("*.json"))] if d.exists() else []
+
+    # deprecation signals (headers) from live calls
+    def save_signals(self, kind: str, api: str, endpoint: str, headers: dict[str, str]) -> None:
+        p = self._dir(kind, api) / "signals" / f"{endpoint}.json"
+        if not headers:
+            p.unlink(missing_ok=True)
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(headers, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def load_signals(self, kind: str, api: str, endpoint: str) -> dict[str, str]:
+        p = self._dir(kind, api) / "signals" / f"{endpoint}.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
     def has_baseline(self, api: str) -> bool:
         return self._dir(BASELINE, api).exists()

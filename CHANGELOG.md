@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 (2026-11-19)
+
+**See removals coming**
+- Spec deprecations: operations, parameters and schema properties that become `deprecated: true` are warnings, with the `x-sunset` date when there is one; removing an already-deprecated operation says so
+- Live deprecation headers: `Deprecation` (RFC 9745, plus older `true`/date forms), `Sunset` (RFC 8594), `Link` (`deprecation`, `sunset`, `successor-version`) and `Warning: 299` are stored for each live endpoint and reported on every check while present. A sunset date shows the days left and becomes breaking once it has passed
+
+**MCP**
+- Prompts, resources and resource templates are listed when the server offers them, and compared: removed prompts and templates, new or newly required prompt arguments, removed resources and MIME type changes
+- The example server gains a prompt and resource templates that change in v2
+
 ## 0.3.0 (2026-11-17)
 
 **Agent tools (MCP)**

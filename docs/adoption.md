@@ -55,6 +55,7 @@ During these weeks, tune the signal:
 
 - For GraphQL, list your `operations:` and set `only_used: true`, so only schema changes your queries touch are reported.
 - For a change you already know about, add a waiver (below) instead of ignoring the report.
+- Watch the warnings, not only the breaking changes: deprecations in specs and `Deprecation`/`Sunset` headers on live calls are the provider telling you the date. A sunset inside 30 days is your most urgent item even though nothing has broken yet.
 - Record each finding that was real. These are the numbers for the step 3 decision.
 
 Exit criterion: the team agrees the reports are worth acting on.
@@ -161,4 +162,4 @@ If you publish an API, you make this easier for every consumer by:
 
 ## What's not there yet
 
-apimend is alpha (0.3). It doesn't rewrite outgoing requests, watch provider changelogs, or run as a proxy; it compares MCP tools but not prompts or resources. See the [roadmap](../README.md#roadmap). Real-world drift that it misses or misgrades is the most useful thing to report.
+apimend is alpha (0.4). It doesn't rewrite outgoing requests, read provider changelogs (only deprecations in specs and response headers), or run as a proxy. See the [roadmap](../README.md#roadmap). Real-world drift that it misses or misgrades is the most useful thing to report.

@@ -17,6 +17,7 @@ class Param:
     location: str  # path | query | header | cookie
     required: bool
     fields: FieldMap
+    deprecated: bool = False
 
 
 @dataclass
@@ -27,6 +28,8 @@ class Operation:
     request: FieldMap | None = None
     request_required: bool = False
     responses: dict[str, FieldMap] = field(default_factory=dict)
+    deprecated: bool = False
+    sunset: str | None = None  # `x-sunset` extension: when the provider plans to remove it
 
     @property
     def key(self) -> str:
@@ -80,7 +83,8 @@ def operations(doc: dict) -> dict[str, Operation]:
             if method not in item:
                 continue
             raw = _deref_object(item[method], resolve) or {}
-            op = Operation(method=method, path=path)
+            op = Operation(method=method, path=path, deprecated=bool(raw.get("deprecated")),
+                           sunset=str(raw["x-sunset"]) if raw.get("x-sunset") else None)
 
             for p in list(shared) + list(raw.get("parameters", [])):
                 p = _deref_object(p, resolve) or {}
@@ -98,6 +102,7 @@ def operations(doc: dict) -> dict[str, Operation]:
                     location=loc,
                     required=bool(p.get("required")) or loc == "path",
                     fields=flatten(schema or {}, resolve, expand_refs=False),
+                    deprecated=bool(p.get("deprecated")),
                 )
 
             if not swagger2 and "requestBody" in raw:

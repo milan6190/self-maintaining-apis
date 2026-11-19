@@ -264,6 +264,11 @@ def _compare_field(path, o: Field, n: Field, response: bool, location: str, from
                    old_vals, new_vals, result: FieldDiff) -> list[Change]:
     out: list[Change] = []
 
+    if n.deprecated and not o.deprecated:
+        what = "returned" if response else "accepted"
+        out.append(Change(WARNING, "field-deprecated", location, path,
+                          f"`{path}` is now deprecated; it may stop being {what}"))
+
     if o.ref != n.ref and o.ref and n.ref:
         out.extend(_compare_refs(path, o.ref, n.ref, response, location))
 
@@ -379,8 +384,9 @@ def diff_specs(old_doc: dict, new_doc: dict, api: str = "") -> list[Change]:
     changes: list[Change] = []
 
     for key in sorted(set(old_ops) - set(new_ops)):
+        was = " (it was already deprecated)" if old_ops[key].deprecated else ""
         changes.append(Change(BREAKING, "operation-removed", f"{prefix}{key}", ROOT,
-                              f"operation `{key}` was removed"))
+                              f"operation `{key}` was removed{was}"))
     for key in sorted(set(new_ops) - set(old_ops)):
         changes.append(Change(INFO, "operation-added", f"{prefix}{key}", ROOT,
                               f"new operation `{key}`"))
@@ -388,6 +394,14 @@ def diff_specs(old_doc: dict, new_doc: dict, api: str = "") -> list[Change]:
     for key in sorted(set(old_ops) & set(new_ops)):
         o, n = old_ops[key], new_ops[key]
         loc = f"{prefix}{key}"
+
+        if n.deprecated and not o.deprecated:
+            when = f"; removal planned for {n.sunset}" if n.sunset else ""
+            changes.append(Change(WARNING, "operation-deprecated", loc, ROOT,
+                                  f"operation `{key}` is now deprecated{when}", new=n.sunset))
+        elif n.sunset and n.sunset != o.sunset:
+            changes.append(Change(WARNING, "sunset-scheduled", loc, ROOT,
+                                  f"operation `{key}` is scheduled for removal on {n.sunset}", new=n.sunset))
 
         for pk in sorted(set(o.params) - set(n.params)):
             changes.append(Change(WARNING, "param-removed", loc, ROOT,
@@ -404,6 +418,9 @@ def diff_specs(old_doc: dict, new_doc: dict, api: str = "") -> list[Change]:
             if not op_.required and np_.required:
                 changes.append(Change(BREAKING, "now-required", ploc, ROOT,
                                       f"{pk[0]} parameter `{pk[1]}` is now required"))
+            if np_.deprecated and not op_.deprecated:
+                changes.append(Change(WARNING, "param-deprecated", ploc, ROOT,
+                                      f"{pk[0]} parameter `{pk[1]}` is now deprecated"))
             fd = diff_fields(op_.fields, np_.fields, direction=REQUEST, location=ploc, detect_renames=False)
             changes.extend(fd.changes)
 
